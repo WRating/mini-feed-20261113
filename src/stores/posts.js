@@ -1,43 +1,58 @@
 /**
  * 动态 store —— 应用唯一的动态数据来源。
  *
- * 设计要点：
- * - 只暴露 actions 修改状态，读方通过 getter 派生，不直接改 posts
- * - 持久化集中在 persist()，任何写操作后立即落盘
- * - 读取历史数据时做一次过滤自愈，避免脏数据导致页面异常
+ * 数据现在**存在服务端**，store 退化为「调用 API → 落到本地响应式状态」的搬运层。
+ * 这带来两个必须守住的约定：
+ *
+ * 1. **本地列表是服务端状态的投影，不是真相**。所以每次写操作成功后都用服务端
+ *    返回的结果覆盖本地（publish 用返回的 post 插头部，merge 直接用返回的完整列表），
+ *    避免前后端对「真实数据」的认知出现分歧。
+ *
+ * 2. **失败必须留下痕迹**。网络问题不能只 return 个 false，否则 UI 无从解释。
+ *    统一写进 `loadError`，让页面能展示「无法连接服务 + 重试」。
+ *
+ * 依赖注入沿用项目既有的工厂模式（同 weather store 的 setWeatherServiceFactory）。
+ * 注意不要用 usePostsStore(api) —— Pinia 会把第一个参数当成 pinia 实例而崩。
  */
 import { computed, ref } from 'vue'
 import { defineStore } from 'pinia'
-import { useStorage } from '@/services/storage-context'
+import { createApiClient } from '@/services/api-client'
 import {
   MAX_LEN,
-  createPost,
   canPublish,
   isValidPost,
-  sortByCreatedAtDesc,
-  isDuplicate
+  sortByCreatedAtDesc
 } from '@/utils/post'
 
-const POSTS_KEY = 'posts'
+let apiFactory = () => createApiClient()
+
+/** 替换 API 客户端工厂（测试注入替身用） */
+export function setPostsApiFactory(factory) {
+  apiFactory = factory
+}
+
+/** 恢复默认工厂 */
+export function resetPostsApiFactory() {
+  apiFactory = () => createApiClient()
+}
+
+/** 把任意异常转成可展示的中文文案：ApiError 已自带文案，其余兜底 */
+function messageOf(error, fallback) {
+  return error?.message || fallback
+}
 
 export const usePostsStore = defineStore('posts', () => {
-  const storage = useStorage()
+  const api = apiFactory()
 
-  /** 从存储恢复；读取失败或数据损坏时退化为空列表 */
-  function restore() {
-    const raw = storage.read(POSTS_KEY)
-    if (!raw) return []
-    try {
-      const parsed = JSON.parse(raw)
-      if (!Array.isArray(parsed)) return []
-      return sortByCreatedAtDesc(parsed.filter(isValidPost))
-    } catch {
-      return []
-    }
-  }
-
-  const posts = ref(restore())
+  const posts = ref([])
   const lastPublishedId = ref(null)
+
+  /** 首次加载是否已完成（用于区分「空列表」与「还没加载」） */
+  const loaded = ref(false)
+  /** 请求进行中（UI 用来禁用按钮、展示骨架） */
+  const loading = ref(false)
+  /** 最近一次失败的文案；成功后清空 */
+  const loadError = ref(null)
 
   const count = computed(() => posts.value.length)
   const isEmpty = computed(() => posts.value.length === 0)
@@ -45,8 +60,40 @@ export const usePostsStore = defineStore('posts', () => {
     posts.value.reduce((sum, post) => sum + post.text.length, 0)
   )
 
-  function persist() {
-    storage.write(POSTS_KEY, JSON.stringify(posts.value))
+  /** 记录失败并返回文案；集中一处，避免每个 action 各写一遍 */
+  function fail(error, fallback = '操作失败') {
+    const message = messageOf(error, fallback)
+    loadError.value = message
+    return message
+  }
+
+  function clearError() {
+    loadError.value = null
+  }
+
+  /**
+   * 从服务端拉取列表。
+   * 不向外抛错：加载失败是**预期内的常态**（后端没启动），
+   * 交给 loadError + loaded 让 UI 决定展示什么。
+   */
+  async function load() {
+    if (loading.value) return
+
+    loading.value = true
+    clearError()
+
+    try {
+      const list = await api.listPosts()
+      // 服务端理论上已倒序，这里再排一次是廉价的自愈：
+      // 即使后端换了实现或经过中间层，前端展示顺序也不会错。
+      posts.value = sortByCreatedAtDesc(list.filter(isValidPost))
+      loaded.value = true
+    } catch (error) {
+      // 刻意不动 posts：保留上一次成功的数据，总比清空成白屏好。
+      loadError.value = messageOf(error, '加载失败')
+    } finally {
+      loading.value = false
+    }
   }
 
   /** 按 id 查找 */
@@ -56,9 +103,12 @@ export const usePostsStore = defineStore('posts', () => {
 
   /**
    * 发布一条动态。
-   * 返回 { ok, post?, error? }，让 UI 能直接展示失败原因。
+   * 返回 { ok, post?, error? }，让 UI 能直接展示失败原因（App.vue 依赖此形状）。
+   *
+   * 本地先做一次校验只是**即时反馈**（省一次往返），服务端才是唯一权威；
+   * 所以这里仍然要处理服务端返回的 TOO_LONG / EMPTY。
    */
-  function publish(text) {
+  async function publish(text) {
     if (typeof text !== 'string') {
       return { ok: false, error: '内容无效' }
     }
@@ -69,69 +119,82 @@ export const usePostsStore = defineStore('posts', () => {
       return { ok: false, error: `内容不能超过 ${MAX_LEN} 字` }
     }
 
-    const post = createPost(text)
-    posts.value = sortByCreatedAtDesc([post, ...posts.value])
-    lastPublishedId.value = post.id
-    persist()
-    return { ok: true, post }
+    try {
+      const post = await api.createPost(text)
+      posts.value = sortByCreatedAtDesc([post, ...posts.value])
+      lastPublishedId.value = post.id
+      clearError()
+      return { ok: true, post }
+    } catch (error) {
+      // 关键：失败时不改列表。内容由 UI 保留在输入框里（契约第 6 节）。
+      return { ok: false, error: fail(error, '发布失败') }
+    }
   }
 
-  /** 删除一条动态，返回是否真的删掉了 */
-  function remove(id) {
-    const before = posts.value.length
-    posts.value = posts.value.filter((post) => post.id !== id)
-    const removed = posts.value.length < before
-    if (removed) {
+  /**
+   * 删除一条动态，返回是否真的删掉了。
+   * 本地不存在该 id 时直接返回 false，省一次必然 404 的请求。
+   */
+  async function remove(id) {
+    if (!getById(id)) return false
+
+    try {
+      await api.removePost(id)
+      posts.value = posts.value.filter((post) => post.id !== id)
       if (lastPublishedId.value === id) lastPublishedId.value = null
-      persist()
+      clearError()
+      return true
+    } catch (error) {
+      fail(error, '删除失败')
+      return false
     }
-    return removed
   }
 
   /**
    * 合并外部动态（用于导入备份）。
-   * 按「内容 + 时间」去重，返回 { added, skipped } 供 UI 反馈。
+   * 去重、截断、跳过非法条目的规则全在服务端（契约 4.7），
+   * 这里直接用返回的完整列表覆盖本地，省一次 GET。
    */
-  function merge(incoming) {
+  async function merge(incoming) {
     if (!Array.isArray(incoming) || incoming.length === 0) {
       return { added: 0, skipped: 0 }
     }
 
-    const merged = [...posts.value]
-    let added = 0
-    let skipped = 0
-
-    incoming.forEach((candidate) => {
-      const post = isValidPost(candidate) ? createPost(candidate.text, candidate) : null
-      if (!post || isDuplicate(merged, post)) {
-        skipped += 1
-        return
-      }
-      merged.push(post)
-      added += 1
-    })
-
-    if (added > 0) {
-      posts.value = sortByCreatedAtDesc(merged)
-      persist()
+    try {
+      const result = await api.mergePosts(incoming)
+      posts.value = sortByCreatedAtDesc((result.posts || []).filter(isValidPost))
+      clearError()
+      return { added: result.added, skipped: result.skipped }
+    } catch (error) {
+      fail(error, '导入失败')
+      return { added: 0, skipped: 0 }
     }
-    return { added, skipped }
   }
 
-  /** 清空全部动态 */
-  function clear() {
-    posts.value = []
-    lastPublishedId.value = null
-    storage.write(POSTS_KEY, JSON.stringify([]))
+  /** 清空全部动态（服务端会保留个人资料） */
+  async function clear() {
+    try {
+      await api.clearPosts()
+      posts.value = []
+      lastPublishedId.value = null
+      clearError()
+    } catch (error) {
+      // 没删干净就不能骗用户：保留列表并留下错误
+      fail(error, '清空失败')
+    }
   }
 
   return {
     posts,
     lastPublishedId,
+    loading,
+    loadError,
+    loaded,
     count,
     isEmpty,
     totalChars,
     getById,
+    load,
     publish,
     remove,
     merge,

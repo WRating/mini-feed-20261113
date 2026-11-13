@@ -1,7 +1,10 @@
 /**
  * DataManager 组件测试（TDD）
- * 数据管理：存储占用条 + 导出/导入/清空三个操作。
+ * 数据管理：服务端数据概览 + 导出/导入/清空三个操作。
  * 组件不直接碰 store 与文件系统，全部通过事件上报。
+ *
+ * 后端是内存存储，没有 5MB 配额这回事，
+ * 因此不再有进度条——展示配额反而会误导用户以为快到上限了。
  */
 import { describe, it, expect, afterEach, vi } from 'vitest'
 import { mount } from '@vue/test-utils'
@@ -10,7 +13,7 @@ import DataManager from './DataManager.vue'
 const find = (wrapper, testid) => wrapper.find(`[data-testid="${testid}"]`)
 
 const baseProps = {
-  meter: { label: '占用 996 B / 约 5 MB', barWidth: '2%', level: 'normal', percent: 2 }
+  stats: { posts: 3, chars: 42, bytes: 812, formatted: '812 B' }
 }
 
 let wrapper
@@ -20,42 +23,53 @@ afterEach(() => {
 })
 
 describe('DataManager · 展示', () => {
-  it('显示存储占用文案', () => {
+  it('展示服务端数据概览：条数、字数、字节', () => {
     wrapper = mount(DataManager, { props: baseProps })
-    expect(find(wrapper, 'storage-text').text()).toBe('占用 996 B / 约 5 MB')
+    const text = find(wrapper, 'storage-text').text()
+
+    expect(text).toContain('服务端数据')
+    expect(text).toContain('3 条动态')
+    expect(text).toContain('42 字')
+    expect(text).toContain('812 B')
   })
 
-  it('进度条宽度按传入值渲染', () => {
-    wrapper = mount(DataManager, { props: baseProps })
-    expect(find(wrapper, 'storage-fill').attributes('style')).toContain('2%')
-  })
-
-  it('进度条带有可访问的进度语义', () => {
-    wrapper = mount(DataManager, { props: baseProps })
-    const bar = find(wrapper, 'storage-bar')
-    expect(bar.attributes('role')).toBe('progressbar')
-    expect(bar.attributes('aria-valuenow')).toBe('2')
-  })
-
-  it('warn 级别带 is-warn 类', () => {
+  it('字节数使用传入的 formatted 而不是自己换算', () => {
     wrapper = mount(DataManager, {
-      props: { meter: { ...baseProps.meter, level: 'warn', percent: 75 } }
+      props: { stats: { posts: 1, chars: 10, bytes: 2048, formatted: '2.0 KB' } }
     })
-    expect(find(wrapper, 'storage-bar').classes()).toContain('is-warn')
+    expect(find(wrapper, 'storage-text').text()).toContain('2.0 KB')
   })
 
-  it('danger 级别带 is-full 类', () => {
-    wrapper = mount(DataManager, {
-      props: { meter: { ...baseProps.meter, level: 'danger', percent: 95 } }
-    })
-    expect(find(wrapper, 'storage-bar').classes()).toContain('is-full')
+  it('没有进度条：内存存储无配额概念', () => {
+    wrapper = mount(DataManager, { props: baseProps })
+    expect(find(wrapper, 'storage-bar').exists()).toBe(false)
+    expect(find(wrapper, 'storage-fill').exists()).toBe(false)
   })
 
-  it('渲染三个操作按钮与说明文字', () => {
+  it('统计缺省时也能渲染，不报错', () => {
+    wrapper = mount(DataManager)
+    expect(find(wrapper, 'storage-text').exists()).toBe(true)
+    expect(find(wrapper, 'storage-text').text()).toContain('服务端数据')
+  })
+
+  it('渲染三个操作按钮', () => {
     wrapper = mount(DataManager, { props: baseProps })
     expect(find(wrapper, 'export-btn').exists()).toBe(true)
     expect(find(wrapper, 'import-btn').exists()).toBe(true)
     expect(find(wrapper, 'clear-btn').exists()).toBe(true)
+  })
+
+  it('说明文字提醒数据存于服务端内存、重启会清空', () => {
+    wrapper = mount(DataManager, { props: baseProps })
+    const text = wrapper.text()
+
+    expect(text).toContain('内存')
+    expect(text).toContain('重启')
+    expect(text).toContain('导出备份')
+  })
+
+  it('保留导入合并的说明', () => {
+    wrapper = mount(DataManager, { props: baseProps })
     expect(wrapper.text()).toContain('导入采用合并方式')
   })
 

@@ -2,41 +2,158 @@
  * 数据备份 composable 测试（TDD）
  *
  * 它是 posts / profile 两个 store 的协调者：
- * - 导出：把两个 store 的当前状态组装成备份文件并触发下载
- * - 导入：解析 → 合并动态 → 按规则恢复资料 → 返回可展示的结果
- * - 清空：两个 store 一起清，保证不留半截状态
+ * - 导出：把两个 store 的当前状态组装成备份文件并触发下载（同步能力，仍为同步）
+ * - 导入：解析 → 合并动态 → 按规则恢复资料 → 返回可展示的结果（后端化后为**异步**）
+ * - 清空：两个 store 一起清，保证不留半截状态（异步）
+ *
+ * 依赖注入同样是工厂模式：为两个 store 各注入一个 fake api-client。
+ * fake api 内部维护一份「服务端状态」，语义对齐 server/store.js（trim / 倒序 /
+ * text+createdAt 去重 / 超长截断 / 默认值才应用备份资料）。
  */
-import { describe, it, expect, beforeEach, vi, afterEach } from 'vitest'
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 import { setActivePinia, createPinia } from 'pinia'
 import { useDataBackup } from './useDataBackup'
-import { usePostsStore } from '@/stores/posts'
-import { useProfileStore } from '@/stores/profile'
-import { createStorage } from '@/services/storage'
-import { setStorage } from '@/services/storage-context'
+import { usePostsStore, setPostsApiFactory, resetPostsApiFactory } from '@/stores/posts'
+import { useProfileStore, setProfileApiFactory, resetProfileApiFactory } from '@/stores/profile'
+import { NAME_MAX, BIO_MAX, AVATARS } from '@shared/constants'
+import { DEFAULT_NAME, DEFAULT_BIO, DEFAULT_AVATAR } from '@shared/constants'
 
 const NOW = new Date(2026, 10, 13, 10, 0, 0).getTime()
 
-let storage
+const clamp = (v, max) => (v.length > max ? v.slice(0, max) : v)
+
+/**
+ * 造一份「服务端」替身，同时充当 posts 与 profile 两个 store 的 api。
+ * 用真实的内存状态模拟服务端，比逐个方法 mock 更能暴露协调层的接缝问题。
+ */
+function fakeServerApi() {
+  let posts = []
+  let profile = {
+    name: DEFAULT_NAME,
+    bio: DEFAULT_BIO,
+    avatar: DEFAULT_AVATAR,
+    joinedAt: NOW - 3 * 86_400_000
+  }
+
+  const sorted = () =>
+    [...posts].sort((a, b) => b.createdAt - a.createdAt).map((p) => ({ ...p }))
+  const dedupeKey = (p) => `${p.text}\u0000${p.createdAt}`
+
+  // 抽成局部函数而不是 api.updateProfile：箭头函数里的 this 不是 api 对象，
+  // 用 this.updateProfile 会在 restoreProfile 内部静默抛错。
+  function applyPatch(patch) {
+    const next = { ...profile }
+    if (patch.name !== undefined) {
+      next.name = clamp(String(patch.name).trim(), NAME_MAX) || DEFAULT_NAME
+    }
+    if (patch.bio !== undefined) next.bio = clamp(String(patch.bio).trim(), BIO_MAX)
+    if (patch.avatar !== undefined) {
+      if (!AVATARS.includes(patch.avatar)) throw new Error('头像不在可选列表中')
+      next.avatar = patch.avatar
+    }
+    profile = next
+    return { ...profile }
+  }
+
+  return {
+    // ---- posts ----
+    listPosts: vi.fn(async () => sorted()),
+
+    createPost: vi.fn(async (text) => {
+      const post = { id: `p${posts.length + 1}`, text: String(text).trim(), createdAt: Date.now() }
+      posts.push(post)
+      return { ...post }
+    }),
+
+    removePost: vi.fn(async (id) => {
+      posts = posts.filter((p) => p.id !== id)
+      return undefined
+    }),
+
+    mergePosts: vi.fn(async (items) => {
+      const existing = new Set(posts.map(dedupeKey))
+      let added = 0
+      let skipped = 0
+
+      items.forEach((raw, index) => {
+        const valid =
+          raw && typeof raw === 'object' && !Array.isArray(raw) &&
+          typeof raw.text === 'string' && Number.isFinite(raw.createdAt)
+        if (!valid) {
+          skipped += 1
+          return
+        }
+        const text = clamp(raw.text.trim(), 280)
+        if (!text) {
+          skipped += 1
+          return
+        }
+        const candidate = {
+          id: typeof raw.id === 'string' && raw.id ? raw.id : `imported-${raw.createdAt}-${index}`,
+          text,
+          createdAt: raw.createdAt
+        }
+        if (existing.has(dedupeKey(candidate))) {
+          skipped += 1
+          return
+        }
+        existing.add(dedupeKey(candidate))
+        posts.push(candidate)
+        added += 1
+      })
+
+      return { added, skipped, posts: sorted() }
+    }),
+
+    clearPosts: vi.fn(async () => {
+      posts = []
+      return undefined
+    }),
+
+    // ---- profile ----
+    getProfile: vi.fn(async () => ({ ...profile })),
+
+    updateProfile: vi.fn(async (patch) => applyPatch(patch)),
+
+    restoreProfile: vi.fn(async (backup) => {
+      const isDefault =
+        profile.name === DEFAULT_NAME &&
+        profile.bio === DEFAULT_BIO &&
+        profile.avatar === DEFAULT_AVATAR
+      if (!isDefault) return { applied: false, profile: { ...profile } }
+      return { applied: true, profile: applyPatch(backup) }
+    }),
+
+    resetProfile: vi.fn(async () => {
+      profile = { name: DEFAULT_NAME, bio: DEFAULT_BIO, avatar: DEFAULT_AVATAR, joinedAt: Date.now() }
+      return { ...profile }
+    })
+  }
+}
+
+let api
 
 beforeEach(() => {
   setActivePinia(createPinia())
-  storage = createStorage()
-  setStorage(storage)
+  api = fakeServerApi()
+  setPostsApiFactory(() => api)
+  setProfileApiFactory(() => api)
   vi.useFakeTimers()
   vi.setSystemTime(NOW)
 })
 
 afterEach(() => {
   vi.useRealTimers()
-  setStorage(null)
+  resetPostsApiFactory()
+  resetProfileApiFactory()
 })
 
 describe('useDataBackup · exportBackup', () => {
-  it('组装出带动态与资料的备份对象', () => {
+  it('组装出带动态与资料的备份对象', async () => {
     const posts = usePostsStore()
     const profile = useProfileStore()
-    posts.publish('第一条')
-    profile.update({ name: '小记' })
+    await posts.publish('第一条')
+    await profile.update({ name: '小记' })
 
     const { buildPayload } = useDataBackup()
     const payload = buildPayload()
@@ -59,9 +176,9 @@ describe('useDataBackup · exportBackup', () => {
     expect(name).toContain('20261113')
   })
 
-  it('下载流程调用了浏览器能力，且不抛错', () => {
+  it('下载流程调用了浏览器能力，且不抛错', async () => {
     const posts = usePostsStore()
-    posts.publish('内容')
+    await posts.publish('内容')
 
     // 只替换静态方法，保留 URL 构造器本身
     const originalCreate = URL.createObjectURL
@@ -113,107 +230,116 @@ describe('useDataBackup · importBackup', () => {
     profile: { name: '备份用户', bio: '来自备份', avatar: '🐼' }
   })
 
-  it('导入合法文件：动态被合并，资料被恢复', () => {
+  it('导入合法文件：动态被合并，资料被恢复', async () => {
     const posts = usePostsStore()
     const profile = useProfileStore()
 
-    const result = useDataBackup().importBackup(validFile)
+    const result = await useDataBackup().importBackup(validFile)
 
     expect(result.ok).toBe(true)
     expect(result.added).toBe(2)
     expect(posts.count).toBe(2)
     expect(profile.name).toBe('备份用户')
+    expect(result.profileRestored).toBe(true)
   })
 
-  it('导入与已有的重复动态会被跳过', () => {
+  it('导入与已有的重复动态会被跳过', async () => {
     const posts = usePostsStore()
-    const existing = posts.publish('已存在')
+    const { post } = await posts.publish('已存在')
 
     const file = JSON.stringify({
-      posts: [{ ...existing.post, id: 'dup-id' }, { id: 'new', text: '新的', createdAt: NOW + 1000 }]
+      posts: [{ ...post, id: 'dup-id' }, { id: 'new', text: '新的', createdAt: NOW + 1000 }]
     })
-    const result = useDataBackup().importBackup(file)
+    const result = await useDataBackup().importBackup(file)
 
     expect(result.added).toBe(1)
     expect(result.skipped).toBe(1)
     expect(posts.count).toBe(2)
   })
 
-  it('用户已自定义资料时不被备份覆盖', () => {
+  it('用户已自定义资料时不被备份覆盖', async () => {
     const profile = useProfileStore()
-    profile.update({ name: '我改过的名字' })
+    await profile.update({ name: '我改过的名字' })
 
-    const result = useDataBackup().importBackup(validFile)
+    const result = await useDataBackup().importBackup(validFile)
     expect(result.ok).toBe(true)
     expect(result.profileRestored).toBe(false)
     expect(profile.name).toBe('我改过的名字')
   })
 
-  it('非法 JSON 返回失败且不改动任何数据', () => {
+  it('非法 JSON 返回失败且不改动任何数据', async () => {
     const posts = usePostsStore()
-    posts.publish('原有')
+    await posts.publish('原有')
 
-    const result = useDataBackup().importBackup('不是 JSON{{')
+    const result = await useDataBackup().importBackup('不是 JSON{{')
     expect(result.ok).toBe(false)
     expect(result.error).toContain('JSON')
     expect(posts.count).toBe(1)
+    // 解析失败时不该触碰服务端
+    expect(api.mergePosts).not.toHaveBeenCalled()
   })
 
-  it('缺少 posts 字段返回失败', () => {
-    const result = useDataBackup().importBackup(JSON.stringify({ foo: 1 }))
+  it('缺少 posts 字段返回失败', async () => {
+    const result = await useDataBackup().importBackup(JSON.stringify({ foo: 1 }))
     expect(result.ok).toBe(false)
     expect(result.error).toContain('posts')
   })
 
-  it('文件为空时返回失败', () => {
-    const result = useDataBackup().importBackup('')
+  it('文件为空时返回失败', async () => {
+    const result = await useDataBackup().importBackup('')
     expect(result.ok).toBe(false)
   })
 
-  it('非法文件不会写入存储', () => {
-    useDataBackup().importBackup('{{bad')
-    expect(storage.read('posts')).toBeNull()
+  it('合并请求失败时返回失败且不改动本地列表', async () => {
+    const posts = usePostsStore()
+    await posts.publish('原有')
+    api.mergePosts.mockRejectedValueOnce(new Error('无法连接服务端'))
+
+    const result = await useDataBackup().importBackup(validFile)
+
+    expect(result.ok).toBe(false)
+    expect(result.error).toBeTruthy()
+    expect(posts.count).toBe(1)
   })
 
-  it('部分条目非法时导入合法部分并报告跳过数', () => {
+  it('部分条目非法时导入合法部分并报告跳过数', async () => {
     const file = JSON.stringify({
       posts: [{ id: 'a', text: 'ok', createdAt: 1 }, { junk: true }]
     })
-    const result = useDataBackup().importBackup(file)
+    const result = await useDataBackup().importBackup(file)
     expect(result.ok).toBe(true)
     expect(result.added).toBe(1)
     expect(result.skipped).toBe(1)
   })
 
-  it('导入后动态按时间倒序排列', () => {
+  it('导入后动态按时间倒序排列', async () => {
     const posts = usePostsStore()
-    posts.publish('本地的')
+    await posts.publish('本地的')
 
-    useDataBackup().importBackup(validFile)
+    await useDataBackup().importBackup(validFile)
     expect(posts.posts[0].text).toBe('备份里的动态')
   })
 })
 
 describe('useDataBackup · clearAll', () => {
-  it('同时清空动态与资料', () => {
+  it('同时清空动态与资料', async () => {
     const posts = usePostsStore()
     const profile = useProfileStore()
-    posts.publish('a')
-    posts.publish('b')
-    profile.update({ name: '阿铁', avatar: '🐼' })
+    await posts.publish('a')
+    await posts.publish('b')
+    await profile.update({ name: '阿铁', avatar: '🐼' })
 
-    useDataBackup().clearAll()
+    await useDataBackup().clearAll()
 
     expect(posts.count).toBe(0)
     expect(profile.name).toBe('我')
     expect(profile.avatar).toBe('🙂')
-    expect(JSON.parse(storage.read('posts'))).toEqual([])
   })
 
-  it('清空后使用天数重新从第 1 天算', () => {
+  it('清空后使用天数重新从第 1 天算', async () => {
     const profile = useProfileStore()
     vi.setSystemTime(NOW + 10 * 86_400_000)
-    useDataBackup().clearAll()
+    await useDataBackup().clearAll()
     expect(profile.daysUsed).toBe(1)
   })
 })

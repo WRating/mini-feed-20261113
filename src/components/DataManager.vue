@@ -1,15 +1,19 @@
 <script setup>
 /**
- * 数据管理：存储占用展示 + 备份导出 / 导入 / 清空。
+ * 数据管理：服务端数据概览 + 备份导出 / 导入 / 清空。
  * 组件只上报意图，实际的文件读写与 store 变更由父级编排。
  * 「清空」是不可逆操作，因此在组件内做一次行内确认。
+ *
+ * 后端是内存存储，没有浏览器那 5MB 配额，所以这里不再画占用进度条：
+ * 画了会让用户以为数据「快满了」，属于误导。
+ * 真正需要提醒的是相反的事实——进程一重启数据就没了，要定期导出。
  */
-import { ref, useTemplateRef } from 'vue'
+import { computed, ref, useTemplateRef } from 'vue'
 
 const props = defineProps({
-  meter: {
+  stats: {
     type: Object,
-    default: () => ({ label: '占用 --', barWidth: '0%', level: 'normal', percent: 0 })
+    default: () => ({ posts: 0, chars: 0, bytes: 0, formatted: '0 B' })
   },
   confirmClear: { type: Boolean, default: true }
 })
@@ -18,6 +22,12 @@ const emit = defineEmits(['export', 'import', 'clear'])
 
 const fileInputRef = useTemplateRef('fileInput')
 const confirming = ref(false)
+
+/** 由后端 /api/stats 提供，字节数直接用服务端算好的 formatted，前端不重复换算 */
+const statsText = computed(() => {
+  const { posts = 0, chars = 0, formatted = '0 B' } = props.stats || {}
+  return `服务端数据 · ${posts} 条动态 · ${chars} 字 · ${formatted}`
+})
 
 function requestImport() {
   const input = fileInputRef.value
@@ -53,24 +63,7 @@ function cancelClear() {
   <div class="data-card card">
     <div class="data-head">
       <span class="data-title">数据管理</span>
-      <span data-testid="storage-text" class="storage-text">{{ meter.label }}</span>
-    </div>
-
-    <div
-      data-testid="storage-bar"
-      class="storage-bar"
-      :class="{ 'is-warn': meter.level === 'warn', 'is-full': meter.level === 'danger' }"
-      role="progressbar"
-      aria-label="本地存储占用"
-      :aria-valuenow="Math.round(meter.percent)"
-      aria-valuemin="0"
-      aria-valuemax="100"
-    >
-      <span
-        data-testid="storage-fill"
-        class="storage-fill"
-        :style="{ width: meter.barWidth }"
-      ></span>
+      <span data-testid="storage-text" class="storage-text">{{ statsText }}</span>
     </div>
 
     <div class="data-actions">
@@ -86,7 +79,8 @@ function cancelClear() {
     </div>
 
     <div v-if="confirming" data-testid="clear-confirm" class="clear-confirm" role="alert">
-      <p class="clear-confirm-text">将删除全部动态与个人资料，且无法恢复。确定继续？</p>
+      <!-- 后端 DELETE /api/posts 只清动态、保留个人资料，文案必须与契约一致 -->
+      <p class="clear-confirm-text">将删除全部动态（保留个人资料），且无法恢复。确定继续？</p>
       <div class="clear-confirm-actions">
         <button data-testid="clear-cancel-btn" class="btn-ghost btn-sm" type="button" @click="cancelClear">
           取消
@@ -98,6 +92,10 @@ function cancelClear() {
     </div>
 
     <p class="data-hint">导出为 JSON 文件；导入采用合并方式，不会覆盖已有动态。</p>
+
+    <p data-testid="memory-hint" class="data-hint data-hint-warn">
+      数据存在服务端内存中，服务重启会清空，建议定期导出备份。
+    </p>
 
     <input
       ref="fileInput"
@@ -122,6 +120,7 @@ function cancelClear() {
   align-items: baseline;
   justify-content: space-between;
   gap: 10px;
+  margin-bottom: 14px;
 }
 
 .data-title {
@@ -135,30 +134,6 @@ function cancelClear() {
   color: var(--text-secondary);
   font-variant-numeric: tabular-nums;
   text-align: right;
-}
-
-.storage-bar {
-  height: 6px;
-  border-radius: 999px;
-  background: #eef0f5;
-  overflow: hidden;
-  margin: 10px 0 14px;
-}
-
-.storage-fill {
-  display: block;
-  height: 100%;
-  border-radius: 999px;
-  background: var(--accent);
-  transition: width 0.25s ease, background 0.25s ease;
-}
-
-.storage-bar.is-warn .storage-fill {
-  background: #f59e0b;
-}
-
-.storage-bar.is-full .storage-fill {
-  background: var(--danger);
 }
 
 .data-actions {
@@ -196,6 +171,11 @@ function cancelClear() {
   font-size: 0.75rem;
   color: var(--text-secondary);
   margin-top: 10px;
+}
+
+.data-hint-warn {
+  color: var(--warn-text);
+  line-height: 1.6;
 }
 
 .hidden-input {

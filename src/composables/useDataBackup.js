@@ -4,6 +4,9 @@
  * 为什么单独放在 composable 而不是塞进 store：
  * 导出/导入天然跨两个领域 store，放在任一 store 里都会让它依赖另一个，
  * 由这个协调者持有流程，两个 store 保持互不知道对方。
+ *
+ * 后端化后的异步性：导出仍是同步的（只读当前内存状态 + 触发下载），
+ * 导入与清空要打接口，因此改为 async，调用方必须 await。
  */
 import { usePostsStore } from '@/stores/posts'
 import { useProfileStore } from '@/stores/profile'
@@ -67,8 +70,11 @@ export function useDataBackup() {
   /**
    * 导入备份内容。合并动态、按规则恢复资料，返回结构化结果供 UI 展示。
    * 解析失败时不触碰任何 store，保证数据不被破坏。
+   *
+   * 后端化后这是**异步**操作：动态要 POST /api/posts/merge，资料要走
+   * POST /api/profile/restore，两者都必须等结果才知道成败。
    */
-  function importBackup(input) {
+  async function importBackup(input) {
     const parsed = parseBackup(input)
     if (!parsed.ok) {
       return {
@@ -80,8 +86,21 @@ export function useDataBackup() {
       }
     }
 
-    const { added, skipped } = postsStore.merge(parsed.posts)
-    const profileRestored = profileStore.restoreFromBackup(parsed.profile)
+    const { added, skipped } = await postsStore.merge(parsed.posts)
+
+    // 合并失败时不再去动资料：连动态都没导入进去，恢复资料只会让状态更混乱。
+    // merge 失败会返回全 0；用 added/skipped 都为 0 且入参非空来判定失败。
+    if (added === 0 && skipped === 0 && parsed.posts.length > 0) {
+      return {
+        ok: false,
+        error: postsStore.loadError || '动态导入失败',
+        added: 0,
+        skipped: 0,
+        profileRestored: false
+      }
+    }
+
+    const profileRestored = await profileStore.restoreFromBackup(parsed.profile)
 
     return {
       ok: true,
@@ -92,10 +111,12 @@ export function useDataBackup() {
     }
   }
 
-  /** 清空全部本地数据（动态 + 资料），两个 store 一起归零 */
-  function clearAll() {
-    postsStore.clear()
-    profileStore.reset()
+  /**
+   * 清空全部数据（动态 + 资料），两个 store 一起归零。
+   * 两者都是独立的 HTTP 请求，用 allSettled 而非 all：一个失败不该让另一个白做。
+   */
+  async function clearAll() {
+    await Promise.allSettled([postsStore.clear(), profileStore.reset()])
   }
 
   return { buildPayload, buildFileName, exportBackup, importBackup, clearAll }

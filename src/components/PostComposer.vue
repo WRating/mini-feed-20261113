@@ -1,14 +1,20 @@
 <script setup>
 /**
- * 发布框：只管输入与提交意图，不碰 store。
- * 提交成功后由本组件负责清空草稿，父组件只负责把内容写入数据层。
+ * 发布框：只管输入与「提交意图」，不碰 store。
+ *
+ * 发布已经改成 HTTP 请求，可能失败（后端没起、网络断）。
+ * 因此这里改成「受控异步」：提交后**不清空**输入框，
+ * 由父组件在请求成功后再调用 clear()。
+ * 否则一次失败就把用户刚敲的字丢了——这是最不可接受的回归。
  */
 import { computed, shallowRef, useTemplateRef } from 'vue'
 import { MAX_LEN, normalizeText, canPublish } from '@/utils/post'
 
 const props = defineProps({
   disabled: { type: Boolean, default: false },
-  initialText: { type: String, default: '' }
+  initialText: { type: String, default: '' },
+  // 请求进行中：锁住提交入口，避免重复提交同一段内容
+  pending: { type: Boolean, default: false }
 })
 
 const emit = defineEmits(['submit'])
@@ -20,18 +26,18 @@ const inputRef = useTemplateRef('input')
 const NEAR_LIMIT_THRESHOLD = 20
 
 const length = computed(() => text.value.length)
-const publishable = computed(() => canPublish(text.value) && !props.disabled)
+// pending 与 disabled 同等对待：都不允许触发提交
+const blocked = computed(() => props.disabled || props.pending)
+const publishable = computed(() => canPublish(text.value) && !blocked.value)
 const nearLimit = computed(() => length.value >= MAX_LEN - NEAR_LIMIT_THRESHOLD)
 const counterText = computed(() => `${length.value} / ${MAX_LEN}`)
+const buttonText = computed(() => (props.pending ? '发布中…' : '发布'))
 
 function submit() {
   if (!publishable.value) return
 
-  const content = normalizeText(text.value)
-  emit('submit', content)
-
-  // 交给父组件落库后即清空，避免重复提交
-  text.value = ''
+  // 只上报意图：不在这里改 text，清空交给父组件在成功之后做
+  emit('submit', normalizeText(text.value))
 }
 
 function onKeydown(event) {
@@ -41,11 +47,15 @@ function onKeydown(event) {
   }
 }
 
+function clear() {
+  text.value = ''
+}
+
 function focus() {
   inputRef.value?.focus()
 }
 
-defineExpose({ focus })
+defineExpose({ clear, focus })
 </script>
 
 <template>
@@ -76,7 +86,7 @@ defineExpose({ focus })
         :disabled="!publishable"
         @click="submit"
       >
-        发布
+        {{ buttonText }}
       </button>
     </div>
   </section>

@@ -5,15 +5,17 @@
  * 1) 先读缓存再刷新，首屏不空白；
  * 2) 接口失败一律降级（用缓存或占位文案），绝不抛错影响发布。
  *
+ * 缓存从 useStorage()（localStorage）改为**模块内内存缓存**：
+ * 后端化之后业务数据都在服务端，浏览器存储不再参与业务（见 docs/api-contract.md 第 6 节），
+ * 为了最后一点天气残留继续保留 storage-shim 这类补丁不划算。代价是刷新页面后
+ * 缓存失效、会重新定位一次 —— 对「20 分钟 TTL」的天气数据而言完全可以接受。
+ *
  * 注：服务通过工厂注入，而不是 useWeatherStore(service) —— Pinia 会把
  * useStore 的第一个参数当成 pinia 实例，传服务对象会导致初始化异常。
  */
 import { computed, ref } from 'vue'
 import { defineStore } from 'pinia'
-import { useStorage } from '@/services/storage-context'
 import { createWeatherService } from '@/services/weather-api'
-
-const WEATHER_KEY = 'weather'
 
 /** 缓存 20 分钟后视为过期，允许后台刷新 */
 export const CACHE_TTL = 20 * 60 * 1000
@@ -30,24 +32,34 @@ export function resetWeatherServiceFactory() {
   serviceFactory = () => createWeatherService()
 }
 
-function readCache(storage) {
-  const raw = storage.read(WEATHER_KEY)
-  if (!raw) return null
-  try {
-    const parsed = JSON.parse(raw)
-    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return null
-    if (!Number.isFinite(parsed.at)) return null
-    return parsed
-  } catch {
-    return null
-  }
+/**
+ * 模块级缓存：{ at, place, weather } 或 null。
+ *
+ * 放在模块作用域而不是 store 内，是为了让「同一页面内多个 store 实例」共享一份缓存
+ * （Pinia 单例下通常只有一个实例，但保持这个语义能让缓存不依赖 Pinia 生命周期）。
+ */
+let weatherCache = null
+
+/** 清空内存缓存（测试隔离用；也会在处理隐私数据时被显式调用） */
+export function resetWeatherCache() {
+  weatherCache = null
+}
+
+/**
+ * 读取缓存，结构不符时返回 null。
+ * 内存缓存理论上不会损坏，但类型校验保证了「有人手动塞了脏数据」也不会崩。
+ */
+function readCache() {
+  const cached = weatherCache
+  if (!cached || typeof cached !== 'object' || Array.isArray(cached)) return null
+  if (!Number.isFinite(cached.at)) return null
+  return cached
 }
 
 export const useWeatherStore = defineStore('weather', () => {
-  const storage = useStorage()
   const service = serviceFactory()
 
-  const cached = readCache(storage)
+  const cached = readCache()
 
   const place = ref(cached?.place || '定位中…')
   const weather = ref(cached?.weather || null)
@@ -80,13 +92,11 @@ export const useWeatherStore = defineStore('weather', () => {
     return parts.join(' · ')
   })
 
+  /** 写入模块级缓存 */
   function persist(placeValue, weatherValue) {
     const at = Date.now()
     cachedAt.value = at
-    storage.write(
-      WEATHER_KEY,
-      JSON.stringify({ at, place: placeValue, weather: weatherValue })
-    )
+    weatherCache = { at, place: placeValue, weather: weatherValue }
   }
 
   /**

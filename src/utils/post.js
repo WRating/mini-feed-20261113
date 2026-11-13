@@ -2,8 +2,11 @@
  * 动态实体相关纯函数：长度约束、创建、校验、排序、去重。
  * 不含任何存储或响应式依赖，方便被 store 与测试复用。
  */
+import { MAX_LEN } from '@shared/constants'
 
-export const MAX_LEN = 280
+// 从共享常量 re-export：这个模块曾是 MAX_LEN 的定义处，外部调用方（store / 组件 / 测试）
+// 都从这里取。改成 re-export 后既保证「唯一真源在 shared」，又不破坏既有 import 路径。
+export { MAX_LEN }
 
 /** 内容规范化：非字符串视为空串，去掉首尾空白 */
 export function normalizeText(value) {

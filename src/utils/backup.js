@@ -4,7 +4,7 @@
  * 解析属于**不可信输入处理**：任何异常都转成 { ok:false, error } 的可读结果，
  * 绝不向调用方抛错，也绝不把未校验的数据往外传。
  */
-import { MAX_LEN, isValidPost, sortByCreatedAtDesc, dedupeKey } from './post'
+import { MAX_LEN, sortByCreatedAtDesc, dedupeKey } from './post'
 
 export const BACKUP_VERSION = 1
 export const BACKUP_APP = 'minifeed'
@@ -119,10 +119,4 @@ export function parseBackup(input) {
     profile: normalizeProfile(data.profile),
     skipped
   }
-}
-
-/** 供 store 做二次兜底校验（例如从 localStorage 读到的历史数据） */
-export function filterValidPosts(list) {
-  if (!Array.isArray(list)) return []
-  return list.filter(isValidPost)
 }
