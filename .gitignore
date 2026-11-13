@@ -10,3 +10,17 @@ desktop.ini
 
 # Logs
 *.log
+
+# Node
+node_modules/
+dist/
+coverage/
+
+# Playwright CLI 临时产物
+.playwright-cli/
+*.yaml
+
+# 本地临时脚本
+_*.txt
+_*.mjs
+_*.bak

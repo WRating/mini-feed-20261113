@@ -1,48 +1,44 @@
 #!/usr/bin/env bash
-# Mini Feed 本地服务器启动器（macOS / Linux）
+# Mini Feed (Vue 3 + Pinia) 开发服务器启动器（macOS / Linux）
 set -e
 
 cd "$(dirname "$0")"
 
-PORT="${1:-8000}"
-URL="http://127.0.0.1:${PORT}/index.html"
+PORT="${1:-5173}"
+URL="http://127.0.0.1:${PORT}/"
 
 echo ""
 echo "  ============================================"
-echo "   Mini Feed - 本地服务器启动器"
+echo "   Mini Feed (Vue 3 + Pinia) - Dev Server"
 echo "  ============================================"
-echo "   工作目录: $(pwd)"
+echo "   Folder : $(pwd)"
 echo ""
 
-open_browser() {
-  sleep 2
+if ! command -v node >/dev/null 2>&1; then
+  echo "  [ERROR] Node.js 未安装，请先安装 Node 18+。"
+  exit 1
+fi
+
+if [ ! -d node_modules ]; then
+  echo "  [INFO] 未找到 node_modules，正在安装依赖..."
+  npm install
+fi
+
+echo "  Address : $URL"
+echo ""
+echo "  数据保存在浏览器 Local Storage 中。"
+echo "  按 Ctrl+C 停止服务。"
+echo "  --------------------------------------------"
+echo ""
+
+# 稍后打开浏览器（Vite 起来需要一点时间）
+(
+  sleep 3
   if command -v open >/dev/null 2>&1; then
     open "$URL"
   elif command -v xdg-open >/dev/null 2>&1; then
     xdg-open "$URL" >/dev/null 2>&1 || true
   fi
-}
+) &
 
-open_browser &
-OPENER=$!
-
-if command -v python3 >/dev/null 2>&1; then
-  echo "   运行时: python3"
-  echo "   访问地址: $URL"
-  echo ""
-  exec python3 -m http.server "$PORT"
-elif command -v python >/dev/null 2>&1; then
-  echo "   运行时: python"
-  echo "   访问地址: $URL"
-  echo ""
-  exec python -m http.server "$PORT"
-elif command -v node >/dev/null 2>&1; then
-  echo "   运行时: node"
-  echo "   访问地址: $URL"
-  echo ""
-  exec node serve.js "$PORT"
-else
-  kill "$OPENER" 2>/dev/null || true
-  echo "  [错误] 未找到 Python 或 Node.js，请先安装其中之一。"
-  exit 1
-fi
+exec npm run dev -- --port "$PORT"
