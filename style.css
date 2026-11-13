@@ -590,10 +590,90 @@ body {
   gap: 8px;
 }
 
-/* ===== 危险操作区 ===== */
-.danger-zone {
+/* ===== 数据管理 ===== */
+.data-card {
   margin-top: 22px;
+  padding: 16px;
+}
+
+.data-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: 10px;
+  margin-bottom: 10px;
+}
+
+.data-title {
+  font-size: 0.88rem;
+  font-weight: 600;
+}
+
+.storage-text {
+  font-size: 0.75rem;
+  color: var(--text-secondary);
+  font-variant-numeric: tabular-nums;
+}
+
+.storage-bar {
+  height: 8px;
+  background: #eef0f7;
+  border-radius: 999px;
+  overflow: hidden;
+}
+
+.storage-fill {
+  display: block;
+  height: 100%;
+  width: 0;
+  border-radius: 999px;
+  background: linear-gradient(90deg, var(--accent), #a29bfe);
+  transition: width 0.3s ease;
+}
+
+.storage-bar.is-warn .storage-fill {
+  background: linear-gradient(90deg, #f59e0b, #f97316);
+}
+
+.storage-bar.is-full .storage-fill {
+  background: linear-gradient(90deg, #f43f5e, var(--danger));
+}
+
+.data-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 14px;
+}
+
+.data-hint {
+  font-size: 0.74rem;
+  color: #9ca3af;
+  margin-top: 10px;
+}
+
+/* ===== Toast ===== */
+.toast {
+  position: fixed;
+  left: 50%;
+  bottom: 32px;
+  transform: translate(-50%, 12px);
+  background: rgba(31, 41, 55, 0.94);
+  color: #fff;
+  font-size: 0.84rem;
+  padding: 9px 18px;
+  border-radius: 999px;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.2s ease, transform 0.2s ease;
+  z-index: 50;
+  max-width: 86vw;
   text-align: center;
+}
+
+.toast.is-show {
+  opacity: 1;
+  transform: translate(-50%, 0);
 }
 
 /* ===== 详情页 ===== */

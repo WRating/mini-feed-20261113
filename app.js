@@ -176,6 +176,13 @@
   var backBtn = document.getElementById("back-btn");
   var clearAllBtn = document.getElementById("clear-all-btn");
   var storageWarning = document.getElementById("storage-warning");
+  var storageText = document.getElementById("storage-text");
+  var storageFill = document.getElementById("storage-fill");
+  var storageBar = storageFill ? storageFill.parentNode : null;
+  var exportBtn = document.getElementById("export-btn");
+  var importBtn = document.getElementById("import-btn");
+  var importFile = document.getElementById("import-file");
+  var toastEl = document.getElementById("toast");
   var tabs = Array.prototype.slice.call(document.querySelectorAll(".tab"));
   var views = {
     home: document.getElementById("view-home"),
@@ -465,6 +472,182 @@
   function renderAll() {
     renderTimeline();
     renderProfile();
+    renderStorage();
+  }
+
+  /* ==================== 存储用量 ==================== */
+
+  var QUOTA_BYTES = 5 * 1024 * 1024; // 浏览器 Local Storage 常见配额约 5MB
+
+  function formatBytes(bytes) {
+    if (bytes < 1024) return bytes + " B";
+    if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(1) + " KB";
+    return (bytes / 1024 / 1024).toFixed(2) + " MB";
+  }
+
+  function storageUsage() {
+    var bytes = 0;
+    if (!storageOK) return 0;
+    try {
+      Object.keys(window.localStorage).forEach(function (key) {
+        if (key.indexOf("minifeed.") !== 0) return;
+        var value = window.localStorage.getItem(key) || "";
+        bytes += (key.length + value.length) * 2; // UTF-16 每字符占 2 字节
+      });
+    } catch (e) {
+      bytes = 0;
+    }
+    return bytes;
+  }
+
+  function renderStorage() {
+    if (!storageFill || !storageText) return;
+
+    var used = storageUsage();
+    var pct = Math.min(100, (used / QUOTA_BYTES) * 100);
+
+    storageFill.style.width = (used > 0 ? Math.max(pct, 2) : 0) + "%";
+    if (storageBar) {
+      storageBar.classList.toggle("is-warn", pct >= 70 && pct < 90);
+      storageBar.classList.toggle("is-full", pct >= 90);
+    }
+
+    if (!storageOK) {
+      storageText.textContent = "本地存储不可用，当前为内存模式";
+    } else if (pct >= 90) {
+      storageText.textContent = "占用 " + formatBytes(used) + " / 约 5 MB · 接近上限";
+    } else {
+      storageText.textContent = "占用 " + formatBytes(used) + " / 约 5 MB";
+    }
+  }
+
+  /* ==================== 提示条 ==================== */
+
+  var toastTimer = null;
+
+  function toast(message) {
+    if (!toastEl) return;
+    toastEl.textContent = message;
+    toastEl.classList.add("is-show");
+    window.clearTimeout(toastTimer);
+    toastTimer = window.setTimeout(function () {
+      toastEl.classList.remove("is-show");
+    }, 2600);
+  }
+
+  /* ==================== 导出 / 导入 ==================== */
+
+  function exportData() {
+    var posts = loadPosts();
+    var payload = {
+      app: "minifeed",
+      version: 1,
+      exportedAt: new Date().toISOString(),
+      profile: loadProfile(),
+      posts: posts
+    };
+
+    if (typeof window.Blob !== "function" || !window.URL || !window.URL.createObjectURL) {
+      toast("当前浏览器不支持导出");
+      return;
+    }
+
+    var blob = new window.Blob([JSON.stringify(payload, null, 2)], { type: "application/json" });
+    var url = window.URL.createObjectURL(blob);
+    var d = new Date();
+    var a = document.createElement("a");
+    a.href = url;
+    a.download = "minifeed-backup-" + d.getFullYear() + pad(d.getMonth() + 1) + pad(d.getDate()) +
+      "-" + pad(d.getHours()) + pad(d.getMinutes()) + ".json";
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    window.setTimeout(function () { window.URL.revokeObjectURL(url); }, 1000);
+
+    toast(posts.length ? "已导出 " + posts.length + " 条动态" : "已导出空备份");
+  }
+
+  function normalizeImportedPosts(list) {
+    var out = [];
+    list.forEach(function (item) {
+      if (!item || typeof item.text !== "string") return;
+      var text = item.text.trim().slice(0, MAX_LEN);
+      if (!text) return;
+      out.push({
+        id: typeof item.id === "string" && item.id ? item.id : createId(),
+        text: text,
+        createdAt: typeof item.createdAt === "number" ? item.createdAt : Date.now()
+      });
+    });
+    return out;
+  }
+
+  function mergePosts(incoming) {
+    var existing = loadPosts();
+    var seen = {};
+    existing.forEach(function (p) { seen[p.text + "@" + p.createdAt] = true; });
+
+    var added = 0;
+    incoming.forEach(function (p) {
+      var sig = p.text + "@" + p.createdAt;
+      if (seen[sig]) return;
+      seen[sig] = true;
+      existing.push(p);
+      added += 1;
+    });
+
+    existing.sort(function (a, b) { return b.createdAt - a.createdAt; });
+    savePosts(existing);
+    return added;
+  }
+
+  function importData(file) {
+    var reader = new window.FileReader();
+
+    reader.onload = function () {
+      var payload;
+      try {
+        payload = JSON.parse(String(reader.result));
+      } catch (e) {
+        toast("导入失败：不是合法的 JSON 文件");
+        return;
+      }
+
+      var list = payload && payload.posts;
+      if (!Array.isArray(list)) {
+        toast("导入失败：文件缺少 posts 数组");
+        return;
+      }
+
+      var incoming = normalizeImportedPosts(list);
+      if (!incoming.length) {
+        toast("导入失败：没有可用的动态");
+        return;
+      }
+
+      var added = mergePosts(incoming);
+
+      // 资料：仅在本地仍为默认资料时才导入，避免覆盖用户已改过的信息
+      var local = loadProfile();
+      var isDefault = local.name === "我" && local.bio === "这个人很懒，什么都没写。";
+      if (isDefault && payload.profile && typeof payload.profile === "object") {
+        saveProfile({
+          name: typeof payload.profile.name === "string" && payload.profile.name ? payload.profile.name : local.name,
+          bio: typeof payload.profile.bio === "string" ? payload.profile.bio : local.bio,
+          avatar: typeof payload.profile.avatar === "string" && payload.profile.avatar ? payload.profile.avatar : local.avatar,
+          joinedAt: typeof payload.profile.joinedAt === "number" ? payload.profile.joinedAt : local.joinedAt
+        });
+      }
+
+      renderAll();
+      toast(added > 0 ? "已导入 " + added + " 条动态" : "没有新动态（内容已存在）");
+    };
+
+    reader.onerror = function () {
+      toast("导入失败：文件读取失败");
+    };
+
+    reader.readAsText(file);
   }
 
   /* ==================== 事件绑定 ==================== */
@@ -518,6 +701,18 @@
   });
 
   clearAllBtn.addEventListener("click", clearAll);
+
+  exportBtn.addEventListener("click", exportData);
+
+  importBtn.addEventListener("click", function () {
+    importFile.value = "";
+    importFile.click();
+  });
+
+  importFile.addEventListener("change", function () {
+    var file = importFile.files && importFile.files[0];
+    if (file) importData(file);
+  });
 
   document.addEventListener("keydown", function (e) {
     if (e.key === "Escape") {
