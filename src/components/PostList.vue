@@ -10,13 +10,15 @@ defineProps({
   author: { type: Object, default: null },
   highlightId: { type: String, default: null },
   removable: { type: Boolean, default: true },
+  /** 判断某条动态的互动请求是否在飞：由父级传入 store 的 isReacting 谓词 */
+  isReacting: { type: Function, default: null },
   emptyTitle: { type: String, default: '还没有动态' },
   emptyHint: { type: String, default: '写下第一条，开始你的记录吧 ✍️' },
   /** 同页存在多个列表时用于区分空状态节点 */
   emptyTestId: { type: String, default: 'empty-state' }
 })
 
-const emit = defineEmits(['open', 'remove'])
+const emit = defineEmits(['open', 'remove', 'like', 'favorite'])
 </script>
 
 <template>
@@ -28,8 +30,11 @@ const emit = defineEmits(['open', 'remove'])
       :author="author"
       :highlight="post.id === highlightId"
       :removable="removable"
+      :reacting="isReacting ? isReacting(post.id) : false"
       @open="emit('open', $event)"
       @remove="emit('remove', $event)"
+      @like="emit('like', $event)"
+      @favorite="emit('favorite', $event)"
     />
 
     <div v-if="posts.length === 0" :data-testid="emptyTestId" class="empty-state">

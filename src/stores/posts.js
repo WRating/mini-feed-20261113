@@ -17,6 +17,7 @@
 import { computed, ref } from 'vue'
 import { defineStore } from 'pinia'
 import { createApiClient } from '@/services/api-client'
+import { toggleReaction as toggleReactionShape } from '@shared/post-shape'
 import {
   MAX_LEN,
   canPublish,
@@ -54,11 +55,35 @@ export const usePostsStore = defineStore('posts', () => {
   /** 最近一次失败的文案；成功后清空 */
   const loadError = ref(null)
 
+  /**
+   * 正在切换互动状态的动态 id 集合。
+   *
+   * 按 post 维度而不是全局加锁：对 A 点赞时仍然可以给 B 收藏，
+   * 只有**同一条**动态的重复点击需要被挡住 —— 那是「快速双击把计数打翻」的真实场景。
+   * 用 Set 而不是单个 boolean，是因为多条动态的请求可以同时在飞。
+   */
+  const reactingIds = ref(new Set())
+
   const count = computed(() => posts.value.length)
   const isEmpty = computed(() => posts.value.length === 0)
   const totalChars = computed(() =>
     posts.value.reduce((sum, post) => sum + post.text.length, 0)
   )
+
+  /** 某条动态是否正在切换互动状态（UI 据此禁用按钮） */
+  function isReacting(id) {
+    return reactingIds.value.has(id)
+  }
+
+  /** 用新对象替换列表中的那一项；返回是否命中 */
+  function replacePost(next) {
+    const index = posts.value.findIndex((post) => post.id === next.id)
+    if (index === -1) return false
+    // 整体替换而不是就地改字段：与「服务端返回的对象覆盖本地副本」保持同一语义，
+    // 也保证依赖引用变化的渲染能可靠触发。
+    posts.value = posts.value.map((post, i) => (i === index ? next : post))
+    return true
+  }
 
   /** 记录失败并返回文案；集中一处，避免每个 action 各写一遍 */
   function fail(error, fallback = '操作失败') {
@@ -151,6 +176,54 @@ export const usePostsStore = defineStore('posts', () => {
   }
 
   /**
+   * 切换点赞 / 收藏状态，返回 { ok, error? }。
+   *
+   * 三段式，顺序都不能换：
+   *
+   * 1. **并发保护**：同一条动态已有请求在飞时直接返回。放在乐观更新之前，
+   *    否则第二次点击会先把状态翻回去，等第一个请求回来又被覆盖成原样，
+   *    用户看到的是「点了没反应」。不同动态之间互不阻塞。
+   *
+   * 2. **乐观更新**：先本地改状态让界面立刻响应（契约 6.1 第 6 条）。
+   *    迁移规则**必须**调用 shared/post-shape.js 的 toggleReaction —— 两端共用同一份，
+   *    自己再写一份很容易在「脏数据（负数计数 / 非布尔标记）」上算出不同结果，
+   *    表现为「点一下高亮了，刷新后又没了」。
+   *
+   * 3. **失败回滚 / 成功覆盖**：回滚到**调用前快照**而不是反向再 toggle 一次 ——
+   *    若期间服务端状态已变，反向 toggle 会算出第三个值。成功后用服务端返回的
+   *    Post 覆盖本地副本，因为本地推算不知道「别人也点了赞」这类事实。
+   */
+  async function toggleReaction(id, kind) {
+    const target = getById(id)
+    if (!target) return { ok: false, error: '动态不存在' }
+    // ignored 让调用方能区分「被并发保护挡下」与「真的失败了」：
+    // 前者不该弹错误提示（用户只是手快），后者必须提示。
+    if (isReacting(id)) return { ok: false, error: '操作进行中，请稍候', ignored: true }
+
+    const snapshot = { ...target }
+    reactingIds.value.add(id)
+    try {
+      // ① 乐观更新
+      replacePost({ ...target, ...toggleReactionShape(target, kind) })
+
+      // ② 以服务端返回为准
+      const updated = await api.setReaction(id, kind)
+      // 列表可能在请求期间被整体替换过（例如后台刷新），替换失败不算错误：
+      // 服务端已经改了，下一次 load 自然会同步回来。
+      replacePost(updated)
+      clearError()
+      return { ok: true }
+    } catch (error) {
+      // ③ 回滚到调用前的快照
+      replacePost(snapshot)
+      return { ok: false, error: fail(error, '操作失败') }
+    } finally {
+      // 无论成败都要解除保护，否则按钮会永久禁用
+      reactingIds.value.delete(id)
+    }
+  }
+
+  /**
    * 合并外部动态（用于导入备份）。
    * 去重、截断、跳过非法条目的规则全在服务端（契约 4.7），
    * 这里直接用返回的完整列表覆盖本地，省一次 GET。
@@ -193,10 +266,12 @@ export const usePostsStore = defineStore('posts', () => {
     count,
     isEmpty,
     totalChars,
+    isReacting,
     getById,
     load,
     publish,
     remove,
+    toggleReaction,
     merge,
     clear
   }

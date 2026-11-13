@@ -136,8 +136,34 @@ function closeDetail() {
   detailId.value = null
 }
 
-async function handleRemove(id) {
-  // 环境无法弹窗时按「取消」处理，避免误删
+/**
+ * 点赞 / 收藏的统一入口。
+ *
+ * 乐观更新、回滚与并发保护全在 store 里（数据状态的归数据），
+ * 这里只做两件事：把失败翻译成用户能看懂的提示，成功后刷新统计。
+ *
+ * 不 await 后再改 UI —— 状态的即时反馈由 store 的乐观更新负责，
+ * 这里若也改一遍就会有两处真相。
+ */
+async function handleReaction(id, kind) {
+  const result = await postsStore.toggleReaction(id, kind)
+  if (!result.ok) {
+    // 被并发保护挡下（用户点快了）不是错误，静默忽略即可。
+    // 判断依据用 store 给出的 ignored 标记，而不是事后看 isReacting ——
+    // 那只能反映「现在」的状态，请求可能已经结束，会把并发挡下误报成失败。
+    if (result.ignored) return
+    toast.show(result.error || '操作失败')
+    return
+  }
+  serverStats.refresh()
+}
+
+/** 判断某条动态的互动请求是否在飞（传给列表以禁用按钮） */
+function isReacting(id) {
+  return postsStore.isReacting(id)
+}
+
+async function handleRemove(id) {  // 环境无法弹窗时按「取消」处理，避免误删
   if (!confirm.ask('确定删除这条动态吗？删除后无法恢复。')) return
 
   const removed = await postsStore.remove(id)
@@ -273,8 +299,11 @@ onMounted(() => {
         <PostDetail
           :post="detailPost"
           :author="author"
+          :reacting="detailPost ? isReacting(detailPost.id) : false"
           @back="closeDetail"
           @remove="handleRemove"
+          @like="(id) => handleReaction(id, 'like')"
+          @favorite="(id) => handleReaction(id, 'favorite')"
         />
       </section>
 
@@ -311,8 +340,11 @@ onMounted(() => {
             :posts="posts"
             :author="author"
             :highlight-id="lastPublishedId"
+            :is-reacting="isReacting"
             @open="openDetail"
             @remove="handleRemove"
+            @like="(id) => handleReaction(id, 'like')"
+            @favorite="(id) => handleReaction(id, 'favorite')"
           />
         </section>
 
@@ -335,11 +367,14 @@ onMounted(() => {
             data-testid="my-timeline"
             :posts="posts"
             :author="author"
+            :is-reacting="isReacting"
             empty-test-id="my-empty"
             empty-title="你还没有发布过动态"
             empty-hint="回到首页写一条吧 ✍️"
             @open="openDetail"
             @remove="handleRemove"
+            @like="(id) => handleReaction(id, 'like')"
+            @favorite="(id) => handleReaction(id, 'favorite')"
           />
 
           <DataManager

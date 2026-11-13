@@ -85,6 +85,68 @@ describe('PostDetail · 交互', () => {
   })
 })
 
+describe('PostDetail · 互动按钮', () => {
+  const reactedPost = { ...post, likes: 2, favorites: 1, liked: true, favorited: true }
+
+  it('渲染点赞与收藏按钮及其计数', () => {
+    wrapper = mount(PostDetail, { props: { post: reactedPost, author } })
+
+    expect(find(wrapper, 'like-count').text()).toBe('2')
+    expect(find(wrapper, 'favorite-count').text()).toBe('1')
+  })
+
+  it('互动字段缺失时计数按 0 显示（兼容旧数据）', () => {
+    wrapper = mount(PostDetail, { props: { post, author } })
+
+    expect(find(wrapper, 'like-count').text()).toBe('0')
+    expect(find(wrapper, 'favorite-count').text()).toBe('0')
+  })
+
+  it('已互动时带 is-active 选中态', () => {
+    wrapper = mount(PostDetail, { props: { post: reactedPost, author } })
+
+    expect(find(wrapper, 'like-btn').classes()).toContain('is-active')
+    expect(find(wrapper, 'favorite-btn').classes()).toContain('is-active')
+  })
+
+  it('点击点赞 emit like 并带上 id', async () => {
+    wrapper = mount(PostDetail, { props: { post, author } })
+    await find(wrapper, 'like-btn').trigger('click')
+
+    expect(wrapper.emitted('like')[0][0]).toBe('p1')
+  })
+
+  it('点击收藏 emit favorite 并带上 id', async () => {
+    wrapper = mount(PostDetail, { props: { post, author } })
+    await find(wrapper, 'favorite-btn').trigger('click')
+
+    expect(wrapper.emitted('favorite')[0][0]).toBe('p1')
+  })
+
+  it('请求进行中时按钮禁用', () => {
+    wrapper = mount(PostDetail, { props: { post, author, reacting: true } })
+
+    expect(find(wrapper, 'like-btn').attributes('disabled')).toBeDefined()
+    expect(find(wrapper, 'favorite-btn').attributes('disabled')).toBeDefined()
+  })
+
+  it('按钮带 aria-label 与 aria-pressed', () => {
+    wrapper = mount(PostDetail, { props: { post: reactedPost, author } })
+
+    expect(find(wrapper, 'like-btn').attributes('aria-label')).toContain('取消点赞')
+    expect(find(wrapper, 'like-btn').attributes('aria-pressed')).toBe('true')
+    expect(find(wrapper, 'favorite-btn').attributes('aria-label')).toContain('取消收藏')
+    expect(find(wrapper, 'favorite-btn').attributes('aria-pressed')).toBe('true')
+  })
+
+  it('post 为 null 时不渲染互动按钮，也不报错', () => {
+    wrapper = mount(PostDetail, { props: { post: null, author } })
+
+    expect(find(wrapper, 'like-btn').exists()).toBe(false)
+    expect(find(wrapper, 'favorite-btn').exists()).toBe(false)
+  })
+})
+
 describe('PostDetail · 缺失数据', () => {
   it('post 为 null 时显示提示而非崩溃', () => {
     wrapper = mount(PostDetail, { props: { post: null, author } })

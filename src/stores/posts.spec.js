@@ -18,6 +18,7 @@ import {
 } from './posts'
 import { ApiError } from '@/services/api-client'
 import { MAX_LEN } from '@/utils/post'
+import { toggleReaction } from '@shared/post-shape'
 
 const NOW = new Date(2026, 10, 13, 10, 0, 0).getTime()
 
@@ -40,6 +41,11 @@ function fakeApi(overrides = {}) {
       posts: [...posts, POST_B, POST_A]
     })),
     clearPosts: vi.fn(async () => undefined),
+    // 默认按本地语义回一个「切换后」的 Post；单个用例可覆盖成别的服务端视图
+    setReaction: vi.fn(async (id, kind) => {
+      const found = [POST_B, POST_A].find((p) => p.id === id) || { id, text: '', createdAt: NOW }
+      return { ...found, ...toggleReaction(found, kind) }
+    }),
     ...overrides
   }
 }
@@ -435,5 +441,240 @@ describe('posts store · 查询与统计', () => {
 
   it('列表为空时 totalChars 为 0', () => {
     expect(storeWith(fakeApi()).totalChars).toBe(0)
+  })
+})
+
+describe('posts store · toggleReaction', () => {
+  /** 造一个「请求挂起中」的可控 api：release 之后才 resolve */
+  function gatedApi(overrides = {}) {
+    let release
+    const gate = new Promise((resolve) => {
+      release = resolve
+    })
+    const api = fakeApi({
+      setReaction: vi.fn(async (id, kind) => {
+        await gate
+        const found = [POST_B, POST_A].find((p) => p.id === id) || { id, text: '', createdAt: NOW }
+        return { ...found, ...toggleReaction(found, kind) }
+      }),
+      ...overrides
+    })
+    return { api, release }
+  }
+
+  it('乐观更新：请求还没回来时本地就已经变成已点赞', async () => {
+    const { api, release } = gatedApi()
+    const store = storeWith(api)
+    await store.load()
+
+    const pending = store.toggleReaction('b', 'like')
+
+    // 关键：await 之前状态就该变了，否则快速连点会显得卡顿
+    expect(store.getById('b').liked).toBe(true)
+    expect(store.getById('b').likes).toBe(1)
+
+    release()
+    await pending
+  })
+
+  it('成功后用服务端返回的 Post 覆盖本地副本（不是本地推算）', async () => {
+    const api = fakeApi({
+      // 服务端给出的计数与本地推算不同（例如别人也点了赞），必须以它为准
+      setReaction: vi.fn(async (id) => ({
+        id,
+        text: '服务端版本',
+        createdAt: NOW,
+        likes: 42,
+        favorites: 7,
+        liked: true,
+        favorited: true
+      }))
+    })
+    const store = storeWith(api)
+    await store.load()
+
+    const result = await store.toggleReaction('b', 'like')
+
+    expect(result.ok).toBe(true)
+    expect(store.getById('b')).toEqual({
+      id: 'b',
+      text: '服务端版本',
+      createdAt: NOW,
+      likes: 42,
+      favorites: 7,
+      liked: true,
+      favorited: true
+    })
+  })
+
+  it('乐观更新走 shared/post-shape 的迁移规则（脏数据也能自洽）', async () => {
+    // 造一条脏数据：计数为负、标记不是布尔。若本地另写一份实现，很容易算出 0 或 NaN。
+    const dirty = { id: 'dirty', text: '脏数据', createdAt: NOW, likes: -5, liked: 'x' }
+    const { api, release } = gatedApi()
+    const store = storeWith(api)
+    await store.load()
+    store.posts = [dirty]
+
+    const pending = store.toggleReaction('dirty', 'like')
+
+    // shared 的规则：先规范化（负数归 0、非 true 视为 false），再切换 → 1 / true
+    expect(store.getById('dirty').likes).toBe(1)
+    expect(store.getById('dirty').liked).toBe(true)
+    expect(store.getById('dirty').favorites).toBe(0)
+    expect(store.getById('dirty').favorited).toBe(false)
+
+    release()
+    await pending
+  })
+
+  it('收藏与点赞互不影响', async () => {
+    const { api, release } = gatedApi()
+    const store = storeWith(api)
+    await store.load()
+
+    const pending = store.toggleReaction('b', 'favorite')
+
+    expect(store.getById('b').favorited).toBe(true)
+    expect(store.getById('b').favorites).toBe(1)
+    expect(store.getById('b').liked).toBe(false)
+    expect(store.getById('b').likes).toBe(0)
+
+    release()
+    await pending
+  })
+
+  it('失败时回滚到调用前的状态并返回可读错误', async () => {
+    const api = fakeApi({
+      setReaction: vi.fn(async () => {
+        throw new ApiError('NETWORK', '无法连接服务端', 0)
+      })
+    })
+    const store = storeWith(api)
+    await store.load()
+    // 契约 4.3：服务端下发的每条动态都带完整互动字段，这里按真实形状构造
+    const original = { ...POST_B, likes: 3, favorites: 1, liked: false, favorited: true }
+    store.posts = [original, POST_A]
+    const before = { ...store.getById('b') }
+
+    const result = await store.toggleReaction('b', 'like')
+
+    expect(result.ok).toBe(false)
+    expect(result.error).toBe('无法连接服务端')
+    // 不仅字段值要回来，整个对象都要与调用前一致（不该留下规范化后的残影）
+    expect(store.getById('b')).toEqual(before)
+    expect(store.getById('b').liked).toBe(false)
+    expect(store.getById('b').likes).toBe(3)
+    expect(store.getById('b').favorited).toBe(true)
+  })
+
+  it('失败后再次点击仍可成功（回滚不留残余状态）', async () => {
+    const setReaction = vi
+      .fn()
+      .mockRejectedValueOnce(new ApiError('NETWORK', '无法连接服务端', 0))
+      .mockImplementation(async (id, kind) => ({
+        id,
+        text: '新的一条',
+        createdAt: NOW,
+        ...toggleReaction({}, kind)
+      }))
+    const store = storeWith(fakeApi({ setReaction }))
+    await store.load()
+
+    expect((await store.toggleReaction('b', 'like')).ok).toBe(false)
+    const retry = await store.toggleReaction('b', 'like')
+
+    expect(retry.ok).toBe(true)
+    expect(store.getById('b').liked).toBe(true)
+  })
+
+  it('同一条动态请求在飞时，再次点击直接返回且不发第二个请求、不改状态', async () => {
+    const { api, release } = gatedApi()
+    const store = storeWith(api)
+    await store.load()
+
+    const first = store.toggleReaction('b', 'like')
+    expect(api.setReaction).toHaveBeenCalledTimes(1)
+
+    // 第二次点击：应当被并发保护挡下（返回 ignored 标记而不是静默成功）
+    const second = await store.toggleReaction('b', 'like')
+    expect(second.ok).toBe(false)
+    // ignored 让 UI 能区分「点快了」与「真的失败了」，前者不该弹错误提示
+    expect(second.ignored).toBe(true)
+    expect(api.setReaction).toHaveBeenCalledTimes(1)
+    // 状态仍是第一次点击后的「已点赞」，没有被翻回去
+    expect(store.getById('b').liked).toBe(true)
+    expect(store.getById('b').likes).toBe(1)
+
+    release()
+    await first
+
+    expect(store.getById('b').liked).toBe(true)
+  })
+
+  it('不同动态的请求互不影响，可以同时在飞', async () => {
+    const { api, release } = gatedApi()
+    const store = storeWith(api)
+    await store.load()
+
+    const p1 = store.toggleReaction('b', 'like')
+    const p2 = store.toggleReaction('a', 'favorite')
+
+    expect(api.setReaction).toHaveBeenCalledTimes(2)
+    expect(store.getById('b').liked).toBe(true)
+    expect(store.getById('a').favorited).toBe(true)
+
+    release()
+    await Promise.all([p1, p2])
+  })
+
+  it('isReacting：请求中为 true，结束后复位', async () => {
+    const { api, release } = gatedApi()
+    const store = storeWith(api)
+    await store.load()
+
+    expect(store.isReacting('b')).toBe(false)
+
+    const pending = store.toggleReaction('b', 'like')
+    expect(store.isReacting('b')).toBe(true)
+    // 按 post 维度隔离：另一条不算在请求中
+    expect(store.isReacting('a')).toBe(false)
+
+    release()
+    await pending
+    expect(store.isReacting('b')).toBe(false)
+  })
+
+  it('失败后 isReacting 同样复位（否则按钮会永久禁用）', async () => {
+    const api = fakeApi({
+      setReaction: vi.fn(async () => {
+        throw new ApiError('NETWORK', '无法连接服务端', 0)
+      })
+    })
+    const store = storeWith(api)
+    await store.load()
+
+    await store.toggleReaction('b', 'like')
+    expect(store.isReacting('b')).toBe(false)
+  })
+
+  it('本地不存在该 id 时返回失败且不发请求（省一次必然 404 的往返）', async () => {
+    const api = fakeApi()
+    const store = storeWith(api)
+    await store.load()
+
+    const result = await store.toggleReaction('not-exist', 'like')
+
+    expect(result.ok).toBe(false)
+    expect(api.setReaction).not.toHaveBeenCalled()
+    expect(store.count).toBe(2)
+  })
+
+  it('本地列表顺序不因互动而改变', async () => {
+    const store = storeWith(fakeApi())
+    await store.load()
+
+    await store.toggleReaction('a', 'like')
+
+    expect(store.posts.map((p) => p.id)).toEqual(['b', 'a'])
   })
 })

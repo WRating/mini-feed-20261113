@@ -73,6 +73,33 @@ describe('PostList · 渲染', () => {
     wrapper = mount(PostList, { props: { posts, author, removable: false } })
     expect(wrapper.findAllComponents(PostCard)[0].props('removable')).toBe(false)
   })
+
+  it('isReacting 谓词只让对应卡片处于请求中状态', () => {
+    // 用谓词而不是单个 id：store 允许「不同动态同时请求」，
+    // 传单个 id 会在两条同时请求时漏掉其中一条的禁用态。
+    wrapper = mount(PostList, {
+      props: { posts, author, isReacting: (id) => id === 'p1' }
+    })
+    const cards = wrapper.findAllComponents(PostCard)
+
+    expect(cards[0].props('reacting')).toBe(false)
+    expect(cards[1].props('reacting')).toBe(true)
+  })
+
+  it('多条动态同时请求中时各自的禁用态互不干扰', () => {
+    wrapper = mount(PostList, {
+      props: { posts, author, isReacting: () => true }
+    })
+    const cards = wrapper.findAllComponents(PostCard)
+
+    expect(cards[0].props('reacting')).toBe(true)
+    expect(cards[1].props('reacting')).toBe(true)
+  })
+
+  it('未传 isReacting 时所有卡片都不处于请求中', () => {
+    wrapper = mount(PostList, { props: { posts, author } })
+    expect(wrapper.findAllComponents(PostCard).every((c) => c.props('reacting') === false)).toBe(true)
+  })
 })
 
 describe('PostList · 事件透传', () => {
@@ -88,5 +115,19 @@ describe('PostList · 事件透传', () => {
     await wrapper.findAllComponents(PostCard)[1].vm.$emit('remove', 'p1')
 
     expect(wrapper.emitted('remove')[0][0]).toBe('p1')
+  })
+
+  it('卡片 like 事件向上转发，带 id', async () => {
+    wrapper = mount(PostList, { props: { posts, author } })
+    await wrapper.findAllComponents(PostCard)[0].vm.$emit('like', 'p2')
+
+    expect(wrapper.emitted('like')[0][0]).toBe('p2')
+  })
+
+  it('卡片 favorite 事件向上转发，带 id', async () => {
+    wrapper = mount(PostList, { props: { posts, author } })
+    await wrapper.findAllComponents(PostCard)[1].vm.$emit('favorite', 'p1')
+
+    expect(wrapper.emitted('favorite')[0][0]).toBe('p1')
   })
 })

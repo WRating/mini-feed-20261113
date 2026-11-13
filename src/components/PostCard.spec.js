@@ -93,6 +93,111 @@ describe('PostCard · 交互', () => {
   })
 })
 
+describe('PostCard · 互动按钮', () => {
+  const reactedPost = { ...basePost, likes: 1, favorites: 1, liked: true, favorited: true }
+
+  it('渲染点赞与收藏按钮及其计数', () => {
+    wrapper = mount(PostCard, { props: { post: reactedPost, author } })
+
+    expect(find(wrapper, 'like-count').text()).toBe('1')
+    expect(find(wrapper, 'favorite-count').text()).toBe('1')
+  })
+
+  it('互动字段缺失时计数按 0 显示（兼容旧数据）', () => {
+    wrapper = mount(PostCard, { props: { post: basePost, author } })
+
+    expect(find(wrapper, 'like-count').text()).toBe('0')
+    expect(find(wrapper, 'favorite-count').text()).toBe('0')
+  })
+
+  it('已点赞 / 已收藏时带 is-active 选中态', () => {
+    wrapper = mount(PostCard, { props: { post: reactedPost, author } })
+
+    expect(find(wrapper, 'like-btn').classes()).toContain('is-active')
+    expect(find(wrapper, 'favorite-btn').classes()).toContain('is-active')
+  })
+
+  it('未互动时没有 is-active', () => {
+    wrapper = mount(PostCard, { props: { post: basePost, author } })
+
+    expect(find(wrapper, 'like-btn').classes()).not.toContain('is-active')
+    expect(find(wrapper, 'favorite-btn').classes()).not.toContain('is-active')
+  })
+
+  it('点击点赞 emit like 并带上 post id', async () => {
+    wrapper = mount(PostCard, { props: { post: basePost, author } })
+    await find(wrapper, 'like-btn').trigger('click')
+
+    expect(wrapper.emitted('like')[0][0]).toBe('p1')
+  })
+
+  it('点击收藏 emit favorite 并带上 post id', async () => {
+    wrapper = mount(PostCard, { props: { post: basePost, author } })
+    await find(wrapper, 'favorite-btn').trigger('click')
+
+    expect(wrapper.emitted('favorite')[0][0]).toBe('p1')
+  })
+
+  it('组件不直接改状态：点击后 post prop 不变，只上报意图', async () => {
+    wrapper = mount(PostCard, { props: { post: basePost, author } })
+    await find(wrapper, 'like-btn').trigger('click')
+
+    expect(wrapper.props('post')).toEqual(basePost)
+    expect(find(wrapper, 'like-count').text()).toBe('0')
+  })
+
+  it('【防回归】点击互动按钮不会触发「打开详情」', async () => {
+    // 卡片主体有点击进详情的行为，按钮必须 @click.stop
+    wrapper = mount(PostCard, { props: { post: basePost, author } })
+    await find(wrapper, 'like-btn').trigger('click')
+    await find(wrapper, 'favorite-btn').trigger('click')
+
+    expect(wrapper.emitted('open')).toBeFalsy()
+  })
+
+  it('请求进行中时两个按钮都禁用', () => {
+    wrapper = mount(PostCard, { props: { post: basePost, author, reacting: true } })
+
+    expect(find(wrapper, 'like-btn').attributes('disabled')).toBeDefined()
+    expect(find(wrapper, 'favorite-btn').attributes('disabled')).toBeDefined()
+  })
+
+  it('非请求中时按钮可用', () => {
+    wrapper = mount(PostCard, { props: { post: basePost, author, reacting: false } })
+
+    expect(find(wrapper, 'like-btn').attributes('disabled')).toBeUndefined()
+    expect(find(wrapper, 'favorite-btn').attributes('disabled')).toBeUndefined()
+  })
+
+  it('禁用的按钮不会再 emit（避免禁用态仍发出请求意图）', async () => {
+    wrapper = mount(PostCard, { props: { post: basePost, author, reacting: true } })
+    await find(wrapper, 'like-btn').trigger('click')
+
+    expect(wrapper.emitted('like')).toBeFalsy()
+  })
+})
+
+describe('PostCard · 互动按钮可访问性', () => {
+  const reactedPost = { ...basePost, likes: 1, favorites: 1, liked: true, favorited: true }
+
+  it('未互动时 aria-pressed 为 false，且 aria-label 说明可点击', () => {
+    wrapper = mount(PostCard, { props: { post: basePost, author } })
+
+    expect(find(wrapper, 'like-btn').attributes('aria-pressed')).toBe('false')
+    expect(find(wrapper, 'like-btn').attributes('aria-label')).toContain('点赞')
+    expect(find(wrapper, 'favorite-btn').attributes('aria-pressed')).toBe('false')
+    expect(find(wrapper, 'favorite-btn').attributes('aria-label')).toContain('收藏')
+  })
+
+  it('已互动时 aria-pressed 为 true，aria-label 说明可取消', () => {
+    wrapper = mount(PostCard, { props: { post: reactedPost, author } })
+
+    expect(find(wrapper, 'like-btn').attributes('aria-pressed')).toBe('true')
+    expect(find(wrapper, 'favorite-btn').attributes('aria-pressed')).toBe('true')
+    expect(find(wrapper, 'like-btn').attributes('aria-label')).toContain('取消')
+  })
+})
+
 describe('PostCard · 可访问性', () => {
   it('卡片主体可聚焦并响应键盘回车', async () => {
     wrapper = mount(PostCard, { props: { post: basePost, author } })

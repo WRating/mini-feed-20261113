@@ -7,6 +7,7 @@
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import { buildBackup, parseBackup, BACKUP_VERSION } from './backup'
+import { BACKUP_VERSION as SHARED_BACKUP_VERSION } from '@shared/constants'
 
 const NOW = new Date(2026, 10, 13, 10, 0, 0).getTime()
 
@@ -33,6 +34,51 @@ describe('buildBackup', () => {
     expect(backup.version).toBe(BACKUP_VERSION)
     expect(backup.exportedAt).toBe(new Date(NOW).toISOString())
     expect(backup.posts).toHaveLength(1)
+  })
+
+  it('版本号为 shared/constants 的 BACKUP_VERSION（v2 起带互动字段）', () => {
+    // 断言引用同一个真源，而不是各自写死 —— 否则两边升级会静默漂移
+    expect(BACKUP_VERSION).toBe(SHARED_BACKUP_VERSION)
+    expect(BACKUP_VERSION).toBe(2)
+  })
+
+  it('每条动态都带上互动字段（导出即完整快照）', () => {
+    const backup = buildBackup({
+      posts: [{ id: 'a', text: 'hi', createdAt: 1, likes: 3, favorites: 1, liked: true, favorited: false }]
+    })
+
+    expect(backup.posts[0]).toEqual({
+      id: 'a',
+      text: 'hi',
+      createdAt: 1,
+      likes: 3,
+      favorites: 1,
+      liked: true,
+      favorited: false
+    })
+  })
+
+  it('旧数据缺互动字段时导出补 0 / false（不出现 undefined）', () => {
+    const backup = buildBackup({ posts: [{ id: 'a', text: 'hi', createdAt: 1 }] })
+
+    expect(backup.posts[0]).toEqual({
+      id: 'a',
+      text: 'hi',
+      createdAt: 1,
+      likes: 0,
+      favorites: 0,
+      liked: false,
+      favorited: false
+    })
+  })
+
+  it('导出时按 shared 规则规范化互动（负数归 0、标记为真抬到 1）', () => {
+    const backup = buildBackup({
+      posts: [{ id: 'a', text: 'hi', createdAt: 1, likes: -5, liked: true }]
+    })
+
+    expect(backup.posts[0].likes).toBe(1)
+    expect(backup.posts[0].liked).toBe(true)
   })
 
   it('深拷贝入参，后续改动不会影响已生成的备份对象', () => {
@@ -169,5 +215,96 @@ describe('parseBackup · 失败路径', () => {
     const result = parseBackup({ posts: [{ id: 'a', text: 'obj', createdAt: 1 }] })
     expect(result.ok).toBe(true)
     expect(result.posts[0].text).toBe('obj')
+  })
+})
+
+describe('parseBackup · 互动字段与版本兼容', () => {
+  it('保留 v2 备份里的互动字段', () => {
+    const raw = JSON.stringify({
+      app: 'minifeed',
+      version: 2,
+      posts: [
+        { id: 'a', text: '已赞', createdAt: 2, likes: 3, favorites: 1, liked: true, favorited: false }
+      ]
+    })
+
+    const post = parseBackup(raw).posts[0]
+    expect(post.likes).toBe(3)
+    expect(post.favorites).toBe(1)
+    expect(post.liked).toBe(true)
+    expect(post.favorited).toBe(false)
+  })
+
+  it('【向后兼容】version:1 的旧备份仍能导入，互动按 0 处理', () => {
+    // 这是最重要的一条：老用户手里的备份文件必须继续可用
+    const raw = JSON.stringify({
+      app: 'minifeed',
+      version: 1,
+      posts: [{ id: 'a', text: '老备份', createdAt: 1 }],
+      profile: { name: '老用户' }
+    })
+
+    const result = parseBackup(raw)
+    expect(result.ok).toBe(true)
+    expect(result.posts[0]).toEqual({
+      id: 'a',
+      text: '老备份',
+      createdAt: 1,
+      likes: 0,
+      favorites: 0,
+      liked: false,
+      favorited: false
+    })
+  })
+
+  it('完全不带 version 的文件同样按 0 处理，不因缺字段报错', () => {
+    const result = parseBackup(JSON.stringify({ posts: [{ id: 'a', text: 'x', createdAt: 1 }] }))
+    expect(result.ok).toBe(true)
+    expect(result.posts[0].likes).toBe(0)
+    expect(result.posts[0].liked).toBe(false)
+  })
+
+  it('用 shared 的 normalizeReactions 规范化：脏互动数据不会漏进 store', () => {
+    const raw = JSON.stringify({
+      posts: [
+        { id: 'a', text: '脏数据', createdAt: 1, likes: -5, favorites: 'x', liked: 1, favorited: null },
+        // 标记为真但计数 0 → 计数抬到 1（否则界面自相矛盾）
+        { id: 'b', text: '不自洽', createdAt: 2, likes: 0, liked: true }
+      ]
+    })
+
+    const [notSelfConsistent, dirty] = parseBackup(raw).posts
+
+    expect(dirty).toEqual({
+      id: 'a',
+      text: '脏数据',
+      createdAt: 1,
+      likes: 0,
+      favorites: 0,
+      liked: false,
+      favorited: false
+    })
+    expect(notSelfConsistent.liked).toBe(true)
+    expect(notSelfConsistent.likes).toBe(1)
+  })
+
+  it('每条动态都带完整的互动字段（下游无需再判 undefined）', () => {
+    const raw = JSON.stringify({ posts: [{ id: 'a', text: 'x', createdAt: 1 }] })
+    const post = parseBackup(raw).posts[0]
+
+    expect(Object.keys(post).sort()).toEqual(
+      ['createdAt', 'favorited', 'favorites', 'id', 'liked', 'likes', 'text'].sort()
+    )
+  })
+
+  it('互动字段不影响去重键：内容与时间相同仍算重复', () => {
+    // 去重只看 text + createdAt，互动不同不该被当成两条
+    const raw = JSON.stringify({
+      posts: [
+        { id: 'a', text: 'dup', createdAt: 1, likes: 5, liked: true },
+        { id: 'b', text: 'dup', createdAt: 1, likes: 0, liked: false }
+      ]
+    })
+    expect(parseBackup(raw).posts).toHaveLength(1)
   })
 })

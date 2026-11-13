@@ -13,7 +13,7 @@ import { computed, ref, useTemplateRef } from 'vue'
 const props = defineProps({
   stats: {
     type: Object,
-    default: () => ({ posts: 0, chars: 0, bytes: 0, formatted: '0 B' })
+    default: () => ({ posts: 0, chars: 0, bytes: 0, likes: 0, favorites: 0, formatted: '0 B' })
   },
   confirmClear: { type: Boolean, default: true }
 })
@@ -23,10 +23,13 @@ const emit = defineEmits(['export', 'import', 'clear'])
 const fileInputRef = useTemplateRef('fileInput')
 const confirming = ref(false)
 
-/** 由后端 /api/stats 提供，字节数直接用服务端算好的 formatted，前端不重复换算 */
+/**
+ * 由后端 /api/stats 提供，字节数直接用服务端算好的 formatted，前端不重复换算。
+ * 互动数缺失时按 0：后端尚未升级到带互动的版本时这一行仍要能正常显示。
+ */
 const statsText = computed(() => {
-  const { posts = 0, chars = 0, formatted = '0 B' } = props.stats || {}
-  return `服务端数据 · ${posts} 条动态 · ${chars} 字 · ${formatted}`
+  const { posts = 0, chars = 0, likes = 0, favorites = 0, formatted = '0 B' } = props.stats || {}
+  return `服务端数据 · ${posts} 条动态 · ${chars} 字 · ${likes} 赞 · ${favorites} 收藏 · ${formatted}`
 })
 
 function requestImport() {
