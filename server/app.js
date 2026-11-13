@@ -19,7 +19,7 @@
 
 import { Hono } from 'hono'
 import { cors } from 'hono/cors'
-import { ERROR_CODES } from '../shared/constants.js'
+import { ERROR_CODES, REACTION_ACTIONS } from '../shared/constants.js'
 
 /** 业务错误码 → HTTP 状态码。契约第 3 节表格的代码化。 */
 const STATUS_BY_CODE = {
@@ -68,6 +68,58 @@ async function readJsonBody(c) {
 }
 
 /**
+ * 读取**可选** JSON 请求体（契约 4.13 用）。
+ *
+ * 为什么不能直接复用 `readJsonBody`：那个函数把「空 body」也归为 `BAD_JSON`，
+ * 而互动接口允许完全不带 body（此时按 toggle 处理）。
+ * 所以这里先取原始文本，只有内容非空白时才尝试解析 ——
+ * 但**有内容却不是合法 JSON 时仍要报 `BAD_JSON`**，不能悄悄当成 toggle，
+ * 否则前端序列化 bug（例如发了 `{action:add}`）会被静默吞掉。
+ */
+async function readOptionalJsonBody(c) {
+  const raw = await c.req.text()
+  if (raw.trim() === '') return {}
+
+  let body
+  try {
+    body = JSON.parse(raw)
+  } catch {
+    throw httpError(ERROR_CODES.BAD_JSON, '请求体不是合法 JSON')
+  }
+
+  if (!isPlainObject(body)) {
+    throw httpError(ERROR_CODES.INVALID, '请求体必须是 JSON 对象')
+  }
+
+  return body
+}
+
+/**
+ * 解析互动动作（契约 4.13）。
+ *
+ * 允许的取值：`toggle` / `add` / `remove`，以及空值（省略 = toggle）。
+ * 返回 undefined 表示「按 toggle 处理」。
+ *
+ * 非空但不在白名单 → `INVALID`：动作是前端可控输入，拼错必须显式报错，
+ * 静默降级成 toggle 会让「设为取消」被误解成「翻转」，状态莫名其妙地变。
+ */
+function parseReactionAction(value) {
+  // 空值（缺字段 / null / 空串）统一表示「未指定」，走 toggle 分支
+  if (value === undefined || value === null || value === '') return undefined
+
+  if (typeof value !== 'string') {
+    throw httpError(ERROR_CODES.INVALID, 'action 必须是字符串')
+  }
+
+  const allowed = Object.values(REACTION_ACTIONS)
+  if (!allowed.includes(value)) {
+    throw httpError(ERROR_CODES.INVALID, `action 只能是 ${allowed.join(' / ')}`)
+  }
+
+  return value
+}
+
+/**
  * 创建 Hono 应用。
  * @param {{ store: object }} deps 必须显式传入 store —— 缺了就直接失败，
  *   否则会「静默」地每个请求都新建一份数据，表现为写完立刻丢。
@@ -92,7 +144,9 @@ export function createApp({ store } = {}) {
       ok: true,
       storage: 'memory',
       uptimeMs: Date.now() - startedAt,
-      startedAt: new Date(startedAt).toISOString()
+      startedAt: new Date(startedAt).toISOString(),
+      // 顺带带上当前动态数，前端一眼确认服务状态，无需再拉一次列表（契约 4.1）
+      posts: store.listPosts().length
     })
   )
 
@@ -142,6 +196,20 @@ export function createApp({ store } = {}) {
     }
     // 契约要求 204 且**无响应体**：c.body(null, 204)
     return c.body(null, 204)
+  })
+
+  // ---------- 4.13 切换互动状态（点赞 / 收藏） ----------
+  app.post('/api/posts/:id/reactions/:kind', async (c) => {
+    // 用可选 body 读取器：契约允许完全不带 body（此时按 toggle）
+    const body = await readOptionalJsonBody(c)
+    const action = parseReactionAction(body.action)
+
+    // kind 的合法性交给 store 判定 —— 它同时要负责「id 不存在」的 NOT_FOUND，
+    // 放在同一处才能保证「先校验哪一项」的顺序在两处实现里不会打架。
+    const post = store.setReaction(c.req.param('id'), c.req.param('kind'), action)
+
+    // 返回完整 Post，前端直接覆盖本地副本，省一次 GET（契约 4.13）
+    return c.json({ post })
   })
 
   // ---------- 4.8 清空动态 ----------

@@ -29,8 +29,20 @@ import {
   DEFAULT_BIO,
   DEFAULT_AVATAR,
   DEDUPE_SEP,
-  ERROR_CODES
+  ERROR_CODES,
+  REACTION_ACTIONS
 } from '../shared/constants.js'
+
+/**
+ * 互动状态迁移刻意走命名空间导入。
+ *
+ * 原因有两个：
+ * 1. 本模块也有一个公开方法叫 `setReaction`，用具名导入会撞名；
+ * 2. 契约要求互动语义**只有一份实现**（`shared/post-shape.js`），
+ *    命名空间调用让「这段逻辑来自共享模块」在代码里一眼可见，
+ *    避免有人手滑在 store 里另写一套 toggle 导致前后端行为漂移。
+ */
+import * as postShape from '../shared/post-shape.js'
 
 /** 构造带 code 的业务错误。code 供 HTTP 层映射状态码，message 直接给前端展示。 */
 function createError(code, message) {
@@ -57,6 +69,18 @@ function clamp(value, max) {
 /** 去重键：内容 + 不可见分隔符 + 时间，与契约 4.7 一致 */
 function dedupeKey(post) {
   return `${post.text}${DEDUPE_SEP}${post.createdAt}`
+}
+
+/**
+ * 把互动状态规范化后写回 Post 副本。
+ *
+ * 为什么每个读接口都要过这一遍：
+ * 存储里可能躺着 v1 时代的旧数据（没有互动字段）。如果直接把内部对象吐出去，
+ * 前端会拿到 `undefined`，渲染出 `NaN` 或「已点赞」与数字不一致的界面。
+ * 统一在这里补全，读接口就不必各写一份兜底。
+ */
+function withReactions(post) {
+  return { ...post, ...postShape.normalizeReactions(post) }
 }
 
 export function createStore() {
@@ -142,13 +166,13 @@ export function createStore() {
     listPosts() {
       return [...posts]
         .sort((a, b) => b.createdAt - a.createdAt)
-        .map((post) => ({ ...post }))
+        .map((post) => withReactions(post))
     },
 
     /** 单条查询；未命中返回 undefined，由 HTTP 层转 404 */
     getPost(id) {
       const found = posts.find((post) => post.id === id)
-      return found ? { ...found } : undefined
+      return found ? withReactions(found) : undefined
     },
 
     /**
@@ -169,9 +193,16 @@ export function createStore() {
         throw createError(ERROR_CODES.TOO_LONG, `内容不能超过 ${MAX_LEN} 字`)
       }
 
-      const post = { id: createId(), text: normalized, createdAt: Date.now() }
+      const post = {
+        id: createId(),
+        text: normalized,
+        createdAt: Date.now(),
+        // 新建动态显式写出互动字段：让 Post 形状在存储层就完整，
+        // 而不是依赖读取时兜底 —— 契约 4.4 明确要求新动态全为 0 / false。
+        ...postShape.normalizeReactions(null)
+      }
       posts.push(post)
-      return { ...post }
+      return withReactions(post)
     },
 
     /** 删除动态；返回是否真的删掉了（供 HTTP 层决定 204 还是 404） */
@@ -222,7 +253,11 @@ export function createStore() {
               ? raw.id
               : `imported-${raw.createdAt}-${index}-${text.slice(0, 8)}`,
           text,
-          createdAt: raw.createdAt
+          createdAt: raw.createdAt,
+          // 契约 4.7：导入的互动状态是**目标状态**而非增量。
+          // 因此这里整体采用 backup 里的值（经规范化），绝不做 += 叠加 ——
+          // 否则同一份备份导入两次就会把计数翻倍。
+          ...postShape.normalizeReactions(raw)
         }
 
         const key = dedupeKey(candidate)
@@ -242,6 +277,48 @@ export function createStore() {
     /** 清空动态，但保留个人资料（契约 4.8） */
     clearPosts() {
       posts = []
+    },
+
+    /**
+     * 切换互动状态（契约 4.13）。
+     *
+     * 三种 action 的语义：
+     * - 省略 / `toggle`：在「有」「无」之间翻转（前端点击的默认行为）
+     * - `add` / `remove`：幂等地设为目标状态。备份导入需要它 ——
+     *   用 toggle 会导致重复导入同一份备份时状态反复翻转。
+     *
+     * 状态迁移全部委托 `shared/post-shape.js`：计数自洽规则（标记为真至少计 1、
+     * 取消不会把计数减到负数）只有那一份实现，前端调同一函数，两端必然一致。
+     */
+    setReaction(id, kind, action) {
+      const index = posts.findIndex((post) => post.id === id)
+      if (index === -1) {
+        throw createError(ERROR_CODES.NOT_FOUND, '动态不存在')
+      }
+
+      // kind 非法必须显式报错，而不是像 post-shape 那样静默规范化 ——
+      // URL 参数是用户/前端可拼错的输入，静默生效会让拼错的请求看起来"成功"了。
+      if (!postShape.isValidKind(kind)) {
+        throw createError(ERROR_CODES.INVALID, '未知的互动类型')
+      }
+
+      const current = posts[index]
+
+      // 省略 action 与显式 toggle 等价；add/remove 走幂等的目标状态设置。
+      // 注意 action 为 undefined/null/'' 都归入 toggle，保证「无 body」可用。
+      let next
+      if (action === REACTION_ACTIONS.ADD) {
+        next = postShape.setReaction(current, kind, true)
+      } else if (action === REACTION_ACTIONS.REMOVE) {
+        next = postShape.setReaction(current, kind, false)
+      } else {
+        next = postShape.toggleReaction(current, kind)
+      }
+
+      // 整体替换而非原地改：post-shape 的迁移函数返回新对象，
+      // 这里把新状态合并回原记录，保证 text/createdAt 等字段不丢。
+      posts[index] = { ...current, ...next }
+      return withReactions(posts[index])
     },
 
     getProfile() {
@@ -291,12 +368,18 @@ export function createStore() {
      * - chars：正文字符数，用于「一共写了多少字」
      * - bytes：整份数据的 UTF-8 字节数，用于展示真实存储占用（emoji 4 字节）
      *   前端拿不到 Buffer，因此由服务端算好下发。
+     * - likes / favorites：全部动态的互动数之和，供个人中心累计展示。
+     *   交给 `sumReactions` 汇总 —— 它会跳过脏数据，避免一条坏记录让整个统计失败。
      */
     stats() {
+      const { likes, favorites } = postShape.sumReactions(posts)
+
       return {
         posts: posts.length,
         chars: posts.reduce((sum, post) => sum + post.text.length, 0),
-        bytes: Buffer.byteLength(JSON.stringify({ posts, profile }), 'utf8')
+        bytes: Buffer.byteLength(JSON.stringify({ posts, profile }), 'utf8'),
+        likes,
+        favorites
       }
     }
   }
