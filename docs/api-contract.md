@@ -18,7 +18,22 @@ type Post = {
   id: string          // 服务端生成，唯一
   text: string        // 已 trim，长度 1..280
   createdAt: number   // 毫秒时间戳
+  likes: number       // 点赞数，非负整数
+  favorites: number   // 收藏数，非负整数
+  liked: boolean      // 当前访问者是否已点赞
+  favorited: boolean  // 当前访问者是否已收藏
 }
+```
+
+互动字段的规范化规则由 `shared/post-shape.js` 定义（前后端共用同一份实现），
+要点：非法计数回落 0；**标记为真但计数为 0 时把计数抬到 1**，避免出现
+「已点赞但 0 人点赞」这种自相矛盾的界面。
+
+> 说明：当前没有登录体系，只有一个隐含的「本机用户」，因此计数实际只会是 0 或 1。
+> 计数与标记分开存是为了将来接真实用户时形状不变。
+
+```ts
+type ReactionKind = 'like' | 'favorite'
 
 type Profile = {
   name: string        // 已 trim，1..20 字
@@ -54,40 +69,48 @@ type Profile = {
 
 ```
 GET /api/health
-200 { "ok": true, "storage": "memory", "uptimeMs": 1234, "startedAt": "2026-11-13T07:00:00.000Z" }
+200 { "ok": true, "storage": "memory", "uptimeMs": 1234,
+      "startedAt": "2026-11-13T07:00:00.000Z", "posts": 3 }
 ```
+
+- `posts`：当前动态数，便于一眼确认服务状态（无需再拉一次列表）。
 
 ### 4.2 统计
 
 ```
 GET /api/stats
-200 { "posts": 3, "chars": 42, "bytes": 812 }
+200 { "posts": 3, "chars": 42, "bytes": 812, "likes": 7, "favorites": 2 }
 ```
 
 - `bytes`：以 UTF-8 计算 `JSON.stringify({posts, profile})` 的字节数，用于前端展示「服务端数据量」。
+- `likes` / `favorites`：全部动态的互动数之和（用于个人中心的累计展示）。
 
 ### 4.3 动态列表
 
 ```
 GET /api/posts
-200 { "posts": [ { "id": "...", "text": "...", "createdAt": 1794534951738 } ] }
+200 { "posts": [ { "id": "...", "text": "...", "createdAt": 1794534951738,
+                   "likes": 1, "favorites": 0, "liked": true, "favorited": false } ] }
 ```
 
 - 按 `createdAt` **倒序**（新的在前）。
 - 无数据时返回 `{ "posts": [] }`（不是 404）。
+- 每条都带完整的互动字段（旧数据缺失时补 0 / false）。
 
 ### 4.4 发布
 
 ```
 POST /api/posts
 body { "text": "  内容  " }
-201 { "post": { "id": "...", "text": "内容", "createdAt": 1794534951738 } }
+201 { "post": { "id": "...", "text": "内容", "createdAt": 1794534951738,
+                "likes": 0, "favorites": 0, "liked": false, "favorited": false } }
 400 { "error": { "code": "EMPTY", "message": "内容不能为空" } }
 400 { "error": { "code": "TOO_LONG", "message": "内容不能超过 280 字" } }
 ```
 
 - 服务端负责 `trim`；trim 后为空 → `EMPTY`。
 - `id` 由服务端生成，客户端**不得**指定。
+- 新动态的互动字段全为 0 / false。
 
 ### 4.5 单条查询
 
@@ -118,6 +141,10 @@ body { "posts": [ { "id": "...", "text": "...", "createdAt": 1794534951738 } ] }
 - 超长文本**截断**到 280 而非丢弃。
 - 缺失 `id` 时服务端补一个。
 - 一并返回合并后的完整列表，前端可省一次 `GET`。
+- 每条可以**带上互动字段**（`likes`/`favorites`/`liked`/`favorited`）；缺失按 0 / false。
+- 导入的互动状态以备份为准（**目标状态**语义，不是叠加），
+  因此同一份备份导入两次得到相同结果，不会把计数翻倍。
+- 超出范围的计数按 `shared/post-shape.js` 规范化（负数归 0，标记为真但计数 0 抬到 1）。
 
 ### 4.8 清空动态
 
@@ -167,6 +194,38 @@ POST /api/profile/reset
 200 { "profile": { ... } }   // name/bio/avatar 回默认，joinedAt 更新为当前时间
 ```
 
+### 4.13 切换互动状态（点赞 / 收藏）
+
+```
+POST /api/posts/:id/reactions/:kind
+```
+
+`kind` ∈ `like` | `favorite`（白名单见 `REACTION_KINDS`）。
+
+**请求体可选**，用于指定目标状态：
+
+```json
+{ "action": "add" }
+```
+
+| action | 含义 |
+| --- | --- |
+| 省略 / `toggle` | 在「有」与「无」之间切换 |
+| `add` | 幂等地设为「有」（已经是「有」则不变） |
+| `remove` | 幂等地设为「无」（已经是「无」则不变） |
+
+```json
+200 { "post": { "id": "...", "text": "...", "createdAt": 1,
+                "likes": 1, "favorites": 0, "liked": true, "favorited": false } }
+404 { "error": { "code": "NOT_FOUND", "message": "动态不存在" } }
+400 { "error": { "code": "INVALID", "message": "未知的互动类型" } }
+```
+
+- 返回**更新后的完整 Post**，前端直接覆盖本地副本即可，无需重新拉列表。
+- 为什么同时要 `add` / `remove`：备份导入需要**幂等的目标状态**。
+  同一份备份导入两次必须得到相同结果，用 toggle 会导致反复翻转。
+- 状态迁移（含计数自洽规则）统一调用 `shared/post-shape.js`，两端行为必然一致。
+
 ## 5. 共享常量
 
 `shared/constants.js` 同时被前端与后端导入，避免两处魔数漂移：
@@ -194,3 +253,10 @@ export const API_BASE = '/api'
 3. **加载态**：首次加载动态时展示加载中，失败展示错误与重试入口。
 4. **服务不可达**：后端没启动时，页面不能白屏或卡死，需给出「无法连接服务」提示与启动指引。
 5. **不再使用 localStorage**：删除 `storage.js` / `storage-shim.js` / `storage-context.js`；天气缓存改为模块内存缓存（20 分钟 TTL 保留）。
+
+### 6.1 互动功能的额外约定
+
+6. **乐观更新 + 失败回滚**：点击点赞/收藏时先改本地状态让界面立刻响应，请求失败则回滚到原状态并 toast 提示。理由：点赞是高频轻量操作，等一个往返才变心形会显得卡顿。
+7. **按 post 维度做并发保护**：同一条动态的请求进行中时，忽略对该条的再次点击（避免快速双击把计数打乱）。不同动态之间互不影响。
+8. **以服务端返回为准**：请求成功后用响应里的 Post 覆盖本地副本，而不是本地推算。
+9. **备份兼容**：导出 `version: 2` 并带互动字段；导入 `version: 1` 的旧备份必须继续可用（互动按 0 处理）。
