@@ -7,7 +7,16 @@
  */
 
 import { describe, it, expect, beforeEach, vi } from 'vitest'
-import { MAX_LEN, NAME_MAX, BIO_MAX, AVATARS, DEFAULT_NAME, DEFAULT_BIO, DEFAULT_AVATAR } from '../shared/constants.js'
+import {
+  MAX_LEN,
+  NAME_MAX,
+  BIO_MAX,
+  AVATARS,
+  DEFAULT_NAME,
+  DEFAULT_BIO,
+  DEFAULT_AVATAR,
+  EMPTY_REACTIONS
+} from '../shared/constants.js'
 
 import { createApp } from './app.js'
 import { createStore } from './store.js'
@@ -79,6 +88,15 @@ describe('GET /api/health', () => {
     expect(typeof data.startedAt).toBe('string')
     expect(Number.isNaN(Date.parse(data.startedAt))).toBe(false)
   })
+
+  it('posts 字段反映当前动态数', async () => {
+    await json('/api/posts', { method: 'POST', body: { text: 'a' } })
+    await json('/api/posts', { method: 'POST', body: { text: 'b' } })
+
+    const data = await (await json('/api/health')).json()
+
+    expect(data.posts).toBe(2)
+  })
 })
 
 describe('GET /api/stats', () => {
@@ -91,6 +109,8 @@ describe('GET /api/stats', () => {
     expect(data.chars).toBe(0)
     expect(typeof data.bytes).toBe('number')
     expect(data.bytes).toBeGreaterThan(0)
+    expect(data.likes).toBe(0)
+    expect(data.favorites).toBe(0)
   })
 
   it('反映已发布的动态', async () => {
@@ -99,6 +119,18 @@ describe('GET /api/stats', () => {
     const data = await (await json('/api/stats')).json()
     expect(data.posts).toBe(1)
     expect(data.chars).toBe(3)
+  })
+
+  it('透传互动数之和', async () => {
+    const created = await (
+      await json('/api/posts', { method: 'POST', body: { text: '统计互动' } })
+    ).json()
+    await json(`/api/posts/${created.post.id}/reactions/like`, { method: 'POST' })
+    await json(`/api/posts/${created.post.id}/reactions/favorite`, { method: 'POST' })
+
+    const data = await (await json('/api/stats')).json()
+    expect(data.likes).toBe(1)
+    expect(data.favorites).toBe(1)
   })
 })
 
@@ -122,7 +154,7 @@ describe('GET /api/posts', () => {
 })
 
 describe('POST /api/posts', () => {
-  it('成功返回 201 与 post 结构', async () => {
+  it('成功返回 201 与完整 post 结构（含互动字段）', async () => {
     const response = await json('/api/posts', { method: 'POST', body: { text: '  你好  ' } })
 
     expect(response.status).toBe(201)
@@ -130,7 +162,8 @@ describe('POST /api/posts', () => {
     expect(data.post).toEqual({
       id: expect.any(String),
       text: '你好',
-      createdAt: expect.any(Number)
+      createdAt: expect.any(Number),
+      ...EMPTY_REACTIONS
     })
   })
 
@@ -344,6 +377,207 @@ describe('POST /api/posts/merge', () => {
 
     expect(response.status).toBe(200)
     expect(await response.json()).toEqual({ added: 0, skipped: 0, posts: [] })
+  })
+
+  it('导入的互动字段原样保留（目标状态语义）', async () => {
+    const response = await json('/api/posts/merge', {
+      method: 'POST',
+      body: {
+        posts: [
+          { text: '带互动', createdAt: 1000, likes: 3, favorites: 2, liked: true, favorited: true }
+        ]
+      }
+    })
+
+    const { posts } = await response.json()
+    expect({
+      likes: posts[0].likes,
+      favorites: posts[0].favorites,
+      liked: posts[0].liked,
+      favorited: posts[0].favorited
+    }).toEqual({ likes: 3, favorites: 2, liked: true, favorited: true })
+  })
+
+  it('同一份备份导入两次，计数不翻倍', async () => {
+    const body = { posts: [{ text: '备份', createdAt: 1000, likes: 4, liked: true }] }
+
+    await json('/api/posts/merge', { method: 'POST', body })
+    const data = await (await json('/api/posts/merge', { method: 'POST', body })).json()
+
+    expect(data.posts[0].likes).toBe(4)
+  })
+})
+
+describe('POST /api/posts/:id/reactions/:kind', () => {
+  /** 测试辅助：发一条动态并返回其 id */
+  async function createPost(text = '互动目标') {
+    const { post } = await (
+      await json('/api/posts', { method: 'POST', body: { text } })
+    ).json()
+    return post.id
+  }
+
+  it('无 body 时按 toggle：未点赞变成已点赞', async () => {
+    const id = await createPost()
+
+    const response = await app.request(`/api/posts/${id}/reactions/like`, { method: 'POST' })
+
+    expect(response.status).toBe(200)
+    const { post } = await response.json()
+    expect(post.liked).toBe(true)
+    expect(post.likes).toBe(1)
+  })
+
+  it('成功返回完整 Post（可直接覆盖本地副本）', async () => {
+    const id = await createPost()
+
+    const { post } = await (
+      await json(`/api/posts/${id}/reactions/like`, { method: 'POST' })
+    ).json()
+
+    expect(post).toEqual({
+      id,
+      text: '互动目标',
+      createdAt: expect.any(Number),
+      likes: 1,
+      favorites: 0,
+      liked: true,
+      favorited: false
+    })
+  })
+
+  it('action=add 幂等地设为「有」', async () => {
+    const id = await createPost()
+
+    await json(`/api/posts/${id}/reactions/like`, { method: 'POST', body: { action: 'add' } })
+    const { post } = await (
+      await json(`/api/posts/${id}/reactions/like`, { method: 'POST', body: { action: 'add' } })
+    ).json()
+
+    expect(post.likes).toBe(1)
+    expect(post.liked).toBe(true)
+  })
+
+  it('action=remove 幂等地设为「无」', async () => {
+    const id = await createPost()
+    await json(`/api/posts/${id}/reactions/like`, { method: 'POST', body: { action: 'add' } })
+
+    const { post } = await (
+      await json(`/api/posts/${id}/reactions/like`, { method: 'POST', body: { action: 'remove' } })
+    ).json()
+
+    expect(post.likes).toBe(0)
+    expect(post.liked).toBe(false)
+  })
+
+  it('action=toggle 与省略 body 等效', async () => {
+    const id = await createPost()
+
+    const { post } = await (
+      await json(`/api/posts/${id}/reactions/favorite`, { method: 'POST', body: { action: 'toggle' } })
+    ).json()
+
+    expect(post.favorited).toBe(true)
+  })
+
+  it('收藏走独立字段，不影响点赞', async () => {
+    const id = await createPost()
+
+    const { post } = await (
+      await json(`/api/posts/${id}/reactions/favorite`, { method: 'POST' })
+    ).json()
+
+    expect(post.favorites).toBe(1)
+    expect(post.favorited).toBe(true)
+    expect(post.likes).toBe(0)
+    expect(post.liked).toBe(false)
+  })
+
+  it('id 不存在返回 404 NOT_FOUND', async () => {
+    const response = await json('/api/posts/nope/reactions/like', { method: 'POST' })
+
+    await expectError(response, 404, 'NOT_FOUND')
+  })
+
+  it('kind 非法返回 400 INVALID', async () => {
+    const id = await createPost()
+
+    const response = await json(`/api/posts/${id}/reactions/likes`, { method: 'POST' })
+
+    await expectError(response, 400, 'INVALID')
+  })
+
+  it('kind 非法的响应提示「未知的互动类型」', async () => {
+    const id = await createPost()
+
+    const data = await (await json(`/api/posts/${id}/reactions/bogus`, { method: 'POST' })).json()
+
+    expect(data.error.message).toContain('未知的互动类型')
+  })
+
+  it('action 不在白名单返回 400 INVALID', async () => {
+    const id = await createPost()
+
+    const response = await json(`/api/posts/${id}/reactions/like`, {
+      method: 'POST',
+      body: { action: 'zap' }
+    })
+
+    await expectError(response, 400, 'INVALID')
+  })
+
+  it('action 为空串时按 toggle 处理', async () => {
+    const id = await createPost()
+
+    const { post } = await (
+      await json(`/api/posts/${id}/reactions/like`, { method: 'POST', body: { action: '' } })
+    ).json()
+
+    expect(post.liked).toBe(true)
+  })
+
+  it('action 非字符串返回 400 INVALID', async () => {
+    const id = await createPost()
+
+    const response = await json(`/api/posts/${id}/reactions/like`, {
+      method: 'POST',
+      body: { action: 123 }
+    })
+
+    await expectError(response, 400, 'INVALID')
+  })
+
+  it('body 非法 JSON 返回 400 BAD_JSON', async () => {
+    const id = await createPost()
+
+    const response = await json(`/api/posts/${id}/reactions/like`, { method: 'POST', raw: '{bad}' })
+
+    await expectError(response, 400, 'BAD_JSON')
+  })
+
+  it('body 不是对象返回 400 INVALID', async () => {
+    const id = await createPost()
+
+    const response = await json(`/api/posts/${id}/reactions/like`, {
+      method: 'POST',
+      body: 'nope'
+    })
+
+    await expectError(response, 400, 'INVALID')
+  })
+
+  it('非法 kind 时不产生状态变更', async () => {
+    const id = await createPost()
+
+    await json(`/api/posts/${id}/reactions/bogus`, { method: 'POST' })
+
+    const { post } = await (await json(`/api/posts/${id}`)).json()
+    expect({
+      likes: post.likes,
+      favorites: post.favorites,
+      liked: post.liked,
+      favorited: post.favorited
+    }).toEqual(EMPTY_REACTIONS)
   })
 })
 

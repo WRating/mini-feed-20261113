@@ -8,7 +8,9 @@ import {
   DEFAULT_BIO,
   DEFAULT_AVATAR,
   DEDUPE_SEP,
-  ERROR_CODES
+  ERROR_CODES,
+  EMPTY_REACTIONS,
+  REACTION_ACTIONS
 } from '../shared/constants.js'
 
 import { createStore } from './store.js'
@@ -70,6 +72,17 @@ describe('addPost', () => {
     const [only] = store.listPosts()
 
     expect(only).toEqual(post)
+  })
+
+  it('新建动态的互动字段全为 0 / false', () => {
+    const post = store.addPost('一条新动态')
+
+    expect({
+      likes: post.likes,
+      favorites: post.favorites,
+      liked: post.liked,
+      favorited: post.favorited
+    }).toEqual(EMPTY_REACTIONS)
   })
 
   it('每次创建都生成不同 id', () => {
@@ -169,6 +182,136 @@ describe('getPost', () => {
 
   it('未命中返回 undefined', () => {
     expect(store.getPost('不存在的 id')).toBeUndefined()
+  })
+
+  it('读取旧数据（缺互动字段）时补全为 0 / false 而不是 undefined', () => {
+    // v1 备份没有互动字段，经 mergePosts 灌入后读取必须形状完整
+    store.mergePosts([{ text: '旧数据', createdAt: 1000 }])
+
+    const fetched = store.getPost(store.listPosts()[0].id)
+
+    expect({
+      likes: fetched.likes,
+      favorites: fetched.favorites,
+      liked: fetched.liked,
+      favorited: fetched.favorited
+    }).toEqual(EMPTY_REACTIONS)
+  })
+})
+
+describe('setReaction', () => {
+  let store
+
+  beforeEach(() => {
+    store = createStore()
+  })
+
+  it('点赞（add）后计数为 1 且标记为真', () => {
+    const post = store.addPost('点赞目标')
+
+    const updated = store.setReaction(post.id, 'like', REACTION_ACTIONS.ADD)
+
+    expect(updated.likes).toBe(1)
+    expect(updated.liked).toBe(true)
+  })
+
+  it('收藏（add）走独立字段，不影响点赞', () => {
+    const post = store.addPost('收藏目标')
+
+    const updated = store.setReaction(post.id, 'favorite', REACTION_ACTIONS.ADD)
+
+    expect(updated.favorites).toBe(1)
+    expect(updated.favorited).toBe(true)
+    expect(updated.likes).toBe(0)
+    expect(updated.liked).toBe(false)
+  })
+
+  it('remove 幂等地设为「无」', () => {
+    const post = store.addPost('取消目标')
+    store.setReaction(post.id, 'like', REACTION_ACTIONS.ADD)
+
+    const updated = store.setReaction(post.id, 'like', REACTION_ACTIONS.REMOVE)
+
+    expect(updated.likes).toBe(0)
+    expect(updated.liked).toBe(false)
+  })
+
+  it('重复 remove 不会把计数减成负数', () => {
+    const post = store.addPost('幂等目标')
+
+    store.setReaction(post.id, 'like', REACTION_ACTIONS.REMOVE)
+    const updated = store.setReaction(post.id, 'like', REACTION_ACTIONS.REMOVE)
+
+    expect(updated.likes).toBe(0)
+  })
+
+  it('省略 action 时按 toggle 处理（未赞 -> 已赞）', () => {
+    const post = store.addPost('切换目标')
+
+    const updated = store.setReaction(post.id, 'like')
+
+    expect(updated.liked).toBe(true)
+    expect(updated.likes).toBe(1)
+  })
+
+  it('toggle 两次回到初始状态', () => {
+    const post = store.addPost('切换两次')
+
+    store.setReaction(post.id, 'like')
+    const updated = store.setReaction(post.id, 'like')
+
+    expect(updated.liked).toBe(false)
+    expect(updated.likes).toBe(0)
+  })
+
+  it('返回更新后的完整 Post 副本（含 id / text / createdAt）', () => {
+    const post = store.addPost('完整形状')
+
+    const updated = store.setReaction(post.id, 'like', REACTION_ACTIONS.ADD)
+
+    expect(updated.id).toBe(post.id)
+    expect(updated.text).toBe(post.text)
+    expect(updated.createdAt).toBe(post.createdAt)
+  })
+
+  it('返回值是副本：改动它不影响内部状态', () => {
+    const post = store.addPost('副本校验')
+
+    const updated = store.setReaction(post.id, 'like', REACTION_ACTIONS.ADD)
+    updated.likes = 999
+
+    expect(store.getPost(post.id).likes).toBe(1)
+  })
+
+  it('更新后的状态会被后续读取到', () => {
+    const post = store.addPost('持久化校验')
+
+    store.setReaction(post.id, 'like', REACTION_ACTIONS.ADD)
+
+    expect(store.getPost(post.id).liked).toBe(true)
+    expect(store.listPosts()[0].liked).toBe(true)
+  })
+
+  it('id 不存在抛 NOT_FOUND', () => {
+    expectCode(() => store.setReaction('nope', 'like', REACTION_ACTIONS.ADD), ERROR_CODES.NOT_FOUND)
+  })
+
+  it('kind 非法抛 INVALID', () => {
+    const post = store.addPost('非法 kind')
+
+    const error = expectCode(
+      () => store.setReaction(post.id, 'likes', REACTION_ACTIONS.ADD),
+      ERROR_CODES.INVALID
+    )
+    expect(error.message).toContain('未知的互动类型')
+  })
+
+  it('kind 非法时不得写入任何状态', () => {
+    const post = store.addPost('非法 kind 不写入')
+
+    expectCode(() => store.setReaction(post.id, 'bogus', REACTION_ACTIONS.ADD), ERROR_CODES.INVALID)
+
+    expect(store.getPost(post.id)).toEqual(post)
   })
 })
 
@@ -326,6 +469,58 @@ describe('mergePosts', () => {
     ])
 
     expect(result).toEqual({ added: 2, skipped: 0 })
+  })
+
+  it('导入时带上互动字段，按目标状态写入', () => {
+    store.mergePosts([
+      { text: '带互动', createdAt: 1000, likes: 3, favorites: 2, liked: true, favorited: true }
+    ])
+
+    const [post] = store.listPosts()
+    expect({
+      likes: post.likes,
+      favorites: post.favorites,
+      liked: post.liked,
+      favorited: post.favorited
+    }).toEqual({ likes: 3, favorites: 2, liked: true, favorited: true })
+  })
+
+  it('缺失互动字段时按 0 / false 补全', () => {
+    store.mergePosts([{ text: '无互动', createdAt: 1000 }])
+
+    const [post] = store.listPosts()
+    expect({
+      likes: post.likes,
+      favorites: post.favorites,
+      liked: post.liked,
+      favorited: post.favorited
+    }).toEqual(EMPTY_REACTIONS)
+  })
+
+  it('超范围计数按 normalizeReactions 规范化（负数归 0、标记为真抬到 1）', () => {
+    store.mergePosts([
+      { text: '负数', createdAt: 1000, likes: -5, liked: false },
+      { text: '自相矛盾', createdAt: 2000, likes: 0, liked: true }
+    ])
+
+    const byText = Object.fromEntries(store.listPosts().map((post) => [post.text, post]))
+    expect(byText['负数'].likes).toBe(0)
+    expect(byText['自相矛盾'].likes).toBe(1)
+  })
+
+  it('同一份备份导入两次结果一致（计数不翻倍）', () => {
+    const backup = [
+      { text: '备份条目', createdAt: 1000, likes: 5, favorites: 2, liked: true, favorited: true }
+    ]
+
+    store.mergePosts(backup)
+
+    // 同一份备份再导一次：去重会跳过，计数必须保持不变
+    store.mergePosts(backup)
+
+    const [post] = store.listPosts()
+    expect(post.likes).toBe(5)
+    expect(post.favorites).toBe(2)
   })
 })
 
@@ -547,11 +742,13 @@ describe('stats', () => {
     store = createStore()
   })
 
-  it('空仓库统计为零', () => {
+  it('空仓库统计为零（含互动数）', () => {
     expect(store.stats()).toEqual({
       posts: 0,
       chars: 0,
-      bytes: expect.any(Number)
+      bytes: expect.any(Number),
+      likes: 0,
+      favorites: 0
     })
   })
 
@@ -596,5 +793,29 @@ describe('stats', () => {
     store.addPost(emoji)
 
     expect(store.stats().chars).toBe(emoji.length)
+  })
+
+  it('likes / favorites 汇总全部动态的互动数', () => {
+    const a = store.addPost('第一条')
+    const b = store.addPost('第二条')
+    store.setReaction(a.id, 'like', REACTION_ACTIONS.ADD)
+    store.setReaction(b.id, 'favorite', REACTION_ACTIONS.ADD)
+    store.setReaction(b.id, 'like', REACTION_ACTIONS.ADD)
+
+    const stats = store.stats()
+
+    expect(stats.likes).toBe(2)
+    expect(stats.favorites).toBe(1)
+  })
+
+  it('清空后互动数归零', () => {
+    const post = store.addPost('待清空')
+    store.setReaction(post.id, 'like', REACTION_ACTIONS.ADD)
+
+    store.clearPosts()
+
+    const stats = store.stats()
+    expect(stats.likes).toBe(0)
+    expect(stats.favorites).toBe(0)
   })
 })
