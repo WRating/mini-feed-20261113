@@ -28,6 +28,22 @@
     <main>
       <!-- ===== 首页 ===== -->
       <section id="view-home" class="view">
+        <!-- 天气 / 时间 卡片 -->
+        <section id="weather-card" class="today-card card">
+          <div class="weather-left">
+            <span id="weather-icon" class="weather-icon" aria-hidden="true">🌤️</span>
+            <div class="weather-info">
+              <p id="weather-temp" class="weather-temp">--°</p>
+              <p id="weather-desc" class="weather-desc">天气加载中…</p>
+            </div>
+          </div>
+          <div class="weather-right">
+            <p id="weather-location" class="weather-location">📍 定位中…</p>
+            <p id="weather-time" class="weather-time">--</p>
+          </div>
+          <button id="weather-refresh" class="weather-refresh" type="button" title="刷新天气" aria-label="刷新天气">⟳</button>
+        </section>
+
         <section class="composer card">
           <textarea
             id="composer-input"
@@ -131,6 +147,7 @@
     </footer>
   </div>
 
+  <script src="weather.js" defer></script>
   <script src="app.js" defer></script>
 </body>
 </html>
