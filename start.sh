@@ -1,15 +1,16 @@
 #!/usr/bin/env bash
-# Mini Feed (Vue 3 + Pinia) 开发服务器启动器（macOS / Linux）
+# Mini Feed (Vue 3 + Pinia + Hono) 开发环境启动器（macOS / Linux）
 set -e
 
 cd "$(dirname "$0")"
 
-PORT="${1:-5173}"
-URL="http://127.0.0.1:${PORT}/"
+WEB_PORT="${1:-5173}"
+API_PORT=8787
+URL="http://127.0.0.1:${WEB_PORT}/"
 
 echo ""
 echo "  ============================================"
-echo "   Mini Feed (Vue 3 + Pinia) - Dev Server"
+echo "   Mini Feed (Vue 3 + Pinia + Hono) - Dev"
 echo "  ============================================"
 echo "   Folder : $(pwd)"
 echo ""
@@ -24,16 +25,17 @@ if [ ! -d node_modules ]; then
   npm install
 fi
 
-echo "  Address : $URL"
+echo "  Frontend : $URL"
+echo "  Backend  : http://127.0.0.1:${API_PORT}/api/health"
 echo ""
-echo "  数据保存在浏览器 Local Storage 中。"
-echo "  按 Ctrl+C 停止服务。"
+echo "  数据保存在后端内存中，重启服务即清空。"
+echo "  按 Ctrl+C 停止前后端两个服务。"
 echo "  --------------------------------------------"
 echo ""
 
-# 稍后打开浏览器（Vite 起来需要一点时间）
+# 稍后打开浏览器（前后端就绪需要一点时间）
 (
-  sleep 3
+  sleep 5
   if command -v open >/dev/null 2>&1; then
     open "$URL"
   elif command -v xdg-open >/dev/null 2>&1; then
@@ -41,4 +43,5 @@ echo ""
   fi
 ) &
 
-exec npm run dev -- --port "$PORT"
+# npm run dev 通过 concurrently 同时启动 Hono API 与 Vite
+exec npm run dev
