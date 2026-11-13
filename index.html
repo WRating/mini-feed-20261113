@@ -1,0 +1,48 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Mini Feed · 记录此刻</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <div class="app">
+    <header class="app-header">
+      <h1 class="logo">Mini Feed</h1>
+      <p class="tagline">记录此刻，分享此刻</p>
+    </header>
+
+    <main>
+      <!-- 发布区 -->
+      <section class="composer card">
+        <textarea
+          id="composer-input"
+          maxlength="280"
+          rows="3"
+          placeholder="此刻在想什么？（Ctrl + Enter 快速发布）"
+        ></textarea>
+        <div class="composer-bar">
+          <span id="char-counter" class="char-counter">0 / 280</span>
+          <button id="publish-btn" class="btn-primary" disabled>发布</button>
+        </div>
+      </section>
+
+      <!-- 时间线 -->
+      <section id="timeline" class="timeline" aria-live="polite"></section>
+
+      <!-- 空状态 -->
+      <div id="empty-state" class="empty-state">
+        <p>还没有动态</p>
+        <p class="empty-hint">写下第一条，开始你的记录吧 ✍️</p>
+      </div>
+    </main>
+
+    <footer class="app-footer">
+      <p>数据仅保存在本机浏览器（Local Storage）</p>
+    </footer>
+  </div>
+
+  <script src="app.js" defer></script>
+</body>
+</html>
