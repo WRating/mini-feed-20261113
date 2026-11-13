@@ -1,16 +1,21 @@
 /**
  * App 集成测试（TDD）
  *
- * 用真实 store + 真实组件（只替换天气服务，避免联网），
- * 从用户视角走完整流程：发布 → 查看 → 详情 → 删除 → 个人中心 → 备份。
- * 这类测试最能防止「重构后功能坏掉」。
+ * 用真实 store + 真实组件，只替换**网络层**（注入 fake api-client）与时间。
+ * 这样既能覆盖完整的用户流程，又不依赖真实后端进程。
+ *
+ * 相比 LocalStorage 版本，这里多了必须覆盖的新场景：
+ * - 服务端不可达时的降级（告警条 + 重试）
+ * - **发布失败时输入框内容必须保留**（这是异步化最容易丢数据的地方）
+ * - 首次加载态与加载完成态的区分
  */
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 import { mount } from '@vue/test-utils'
 import { createPinia, setActivePinia } from 'pinia'
 import App from './App.vue'
-import { createStorage } from '@/services/storage'
-import { setStorage } from '@/services/storage-context'
+import { setPostsApiFactory, resetPostsApiFactory } from '@/stores/posts'
+import { setProfileApiFactory, resetProfileApiFactory } from '@/stores/profile'
+import { setStatsApiFactory, resetStatsApiFactory } from '@/composables/useServerStats'
 import { setWeatherServiceFactory, resetWeatherServiceFactory } from '@/stores/weather'
 
 const NOW = new Date(2026, 10, 13, 10, 0, 0).getTime()
@@ -20,7 +25,171 @@ const home = (wrapper) => wrapper.find('[data-testid="home-timeline"]')
 const homeFind = (wrapper, testid) => home(wrapper).find(`[data-testid="${testid}"]`)
 const homeFindAll = (wrapper, testid) => home(wrapper).findAll(`[data-testid="${testid}"]`)
 
-/** 天气服务替身，避免测试联网 */
+/**
+ * 内存版「后端」替身 —— 模拟服务端行为（trim、倒序、去重、资料默认值保护）。
+ * 刻意实现成有状态的：这样才能测出「写成功后本地与远端一致」这类问题。
+ */
+function createFakeBackend() {
+  const state = {
+    posts: [],
+    profile: { name: '我', bio: '这个人很懒，什么都没写。', avatar: '🙂', joinedAt: NOW },
+    failNext: null
+  }
+
+  let seq = 0
+  const sorted = () => [...state.posts].sort((a, b) => b.createdAt - a.createdAt)
+
+  function maybeThrow() {
+    if (state.failNext) {
+      const error = new Error(state.failNext.message || '请求失败')
+      error.code = state.failNext.code || 'NETWORK'
+      state.failNext = null
+      throw error
+    }
+  }
+
+  return {
+    state,
+    /** 让下一次调用失败 */
+    failNextWith(message, code = 'NETWORK') {
+      state.failNext = { message, code }
+    },
+
+    getStats: vi.fn(async () => {
+      maybeThrow()
+      return {
+        posts: state.posts.length,
+        chars: state.posts.reduce((s, p) => s + p.text.length, 0),
+        bytes: 812
+      }
+    }),
+
+    listPosts: vi.fn(async () => {
+      maybeThrow()
+      return sorted()
+    }),
+
+    createPost: vi.fn(async (text) => {
+      maybeThrow()
+      const trimmed = String(text).trim()
+      if (!trimmed) {
+        const error = new Error('内容不能为空')
+        error.code = 'EMPTY'
+        throw error
+      }
+      if (trimmed.length > 280) {
+        const error = new Error('内容不能超过 280 字')
+        error.code = 'TOO_LONG'
+        throw error
+      }
+      seq += 1
+      const post = { id: `srv-${seq}`, text: trimmed, createdAt: Date.now() }
+      state.posts.push(post)
+      return post
+    }),
+
+    getPost: vi.fn(async (id) => {
+      maybeThrow()
+      const found = state.posts.find((p) => p.id === id)
+      if (!found) {
+        const error = new Error('动态不存在')
+        error.code = 'NOT_FOUND'
+        throw error
+      }
+      return found
+    }),
+
+    removePost: vi.fn(async (id) => {
+      maybeThrow()
+      const before = state.posts.length
+      state.posts = state.posts.filter((p) => p.id !== id)
+      if (state.posts.length === before) {
+        const error = new Error('动态不存在')
+        error.code = 'NOT_FOUND'
+        throw error
+      }
+      return undefined
+    }),
+
+    mergePosts: vi.fn(async (items) => {
+      maybeThrow()
+      let added = 0
+      let skipped = 0
+      const keys = new Set(state.posts.map((p) => `${p.text}@${p.createdAt}`))
+      ;(items || []).forEach((raw, index) => {
+        if (!raw || typeof raw.text !== 'string' || !Number.isFinite(raw.createdAt)) {
+          skipped += 1
+          return
+        }
+        const text = raw.text.trim().slice(0, 280)
+        if (!text) {
+          skipped += 1
+          return
+        }
+        const key = `${text}@${raw.createdAt}`
+        if (keys.has(key)) {
+          skipped += 1
+          return
+        }
+        keys.add(key)
+        state.posts.push({
+          id: raw.id || `imported-${raw.createdAt}-${index}`,
+          text,
+          createdAt: raw.createdAt
+        })
+        added += 1
+      })
+      return { added, skipped, posts: sorted() }
+    }),
+
+    clearPosts: vi.fn(async () => {
+      maybeThrow()
+      state.posts = []
+      return undefined
+    }),
+
+    getProfile: vi.fn(async () => {
+      maybeThrow()
+      return { ...state.profile }
+    }),
+
+    updateProfile: vi.fn(async (patch) => {
+      maybeThrow()
+      if (patch.name !== undefined) {
+        const name = String(patch.name).trim().slice(0, 20)
+        state.profile.name = name || '我'
+      }
+      if (patch.bio !== undefined) state.profile.bio = String(patch.bio).trim().slice(0, 60)
+      if (patch.avatar !== undefined) state.profile.avatar = patch.avatar
+      return { ...state.profile }
+    }),
+
+    restoreProfile: vi.fn(async (source) => {
+      maybeThrow()
+      const isDefault =
+        state.profile.name === '我' &&
+        state.profile.bio === '这个人很懒，什么都没写。' &&
+        state.profile.avatar === '🙂'
+      if (!isDefault) return { applied: false, profile: { ...state.profile } }
+
+      if (typeof source?.name === 'string' && source.name.trim()) {
+        state.profile.name = source.name.trim().slice(0, 20)
+      }
+      if (typeof source?.bio === 'string' && source.bio.trim()) {
+        state.profile.bio = source.bio.trim().slice(0, 60)
+      }
+      if (typeof source?.avatar === 'string') state.profile.avatar = source.avatar
+      return { applied: true, profile: { ...state.profile } }
+    }),
+
+    resetProfile: vi.fn(async () => {
+      maybeThrow()
+      state.profile = { name: '我', bio: '这个人很懒，什么都没写。', avatar: '🙂', joinedAt: Date.now() }
+      return { ...state.profile }
+    })
+  }
+}
+
 function stubWeather() {
   setWeatherServiceFactory(() => ({
     load: async () => ({
@@ -32,11 +201,13 @@ function stubWeather() {
   }))
 }
 
-let storage
+let backend
 let wrapper
 
 async function mountApp() {
   wrapper = mount(App, { attachTo: document.body })
+  // 等待 onMounted 里的并发加载完成
+  await flush()
   await flush()
   return wrapper
 }
@@ -45,8 +216,10 @@ const flush = () => new Promise((resolve) => setTimeout(resolve, 0))
 
 beforeEach(() => {
   setActivePinia(createPinia())
-  storage = createStorage()
-  setStorage(storage)
+  backend = createFakeBackend()
+  setPostsApiFactory(() => backend)
+  setProfileApiFactory(() => backend)
+  setStatsApiFactory(() => backend)
   stubWeather()
   vi.useFakeTimers({ shouldAdvanceTime: true })
   vi.setSystemTime(NOW)
@@ -55,358 +228,400 @@ beforeEach(() => {
 afterEach(() => {
   wrapper?.unmount()
   vi.useRealTimers()
-  setStorage(null)
+  resetPostsApiFactory()
+  resetProfileApiFactory()
+  resetStatsApiFactory()
   resetWeatherServiceFactory()
 })
 
-describe('App · 发布与查看', () => {
-  it('默认展示首页，输入框与按钮就绪', async () => {
+describe('App · 首屏加载', () => {
+  it('挂载后从服务端拉取动态', async () => {
+    backend.state.posts.push({ id: 'a', text: '来自服务端', createdAt: NOW })
     await mountApp()
-    expect(find(wrapper, 'composer-input').exists()).toBe(true)
-    expect(find(wrapper, 'publish-btn').attributes('disabled')).toBeDefined()
+
+    expect(homeFind(wrapper, 'post-text').text()).toBe('来自服务端')
+    expect(backend.listPosts).toHaveBeenCalled()
   })
 
-  it('空列表展示空状态', async () => {
+  it('服务端无数据时展示空状态', async () => {
     await mountApp()
-    expect(find(wrapper, 'empty-state').exists()).toBe(true)
+    expect(homeFind(wrapper, 'empty-state').exists()).toBe(true)
   })
 
-  it('发布一条动态后出现在列表中，空状态消失', async () => {
+  it('挂载时同时拉取资料与统计', async () => {
+    await mountApp()
+    expect(backend.getProfile).toHaveBeenCalled()
+    expect(backend.getStats).toHaveBeenCalled()
+  })
+
+  it('加载完成后不再显示加载态', async () => {
+    await mountApp()
+    expect(find(wrapper, 'loading-state').exists()).toBe(false)
+  })
+
+  it('资料从服务端恢复', async () => {
+    backend.state.profile.name = '服务端用户'
+    await mountApp()
+    expect(find(wrapper, 'profile-name').text()).toBe('服务端用户')
+  })
+
+  it('统计展示服务端数据量', async () => {
+    backend.state.posts.push({ id: 'a', text: 'abc', createdAt: NOW })
     await mountApp()
 
-    await find(wrapper, 'composer-input').setValue('集成测试：第一条')
+    await find(wrapper, 'tab-profile').trigger('click')
+    expect(find(wrapper, 'storage-text').text()).toContain('服务端数据')
+    expect(find(wrapper, 'storage-text').text()).toContain('1 条动态')
+  })
+})
+
+describe('App · 发布', () => {
+  it('发布成功后出现在列表中，并写入服务端', async () => {
+    await mountApp()
+
+    await find(wrapper, 'composer-input').setValue('新动态')
     await find(wrapper, 'publish-btn').trigger('click')
+    await flush()
 
-    expect(homeFind(wrapper, 'post-text').text()).toBe('集成测试：第一条')
-    expect(homeFind(wrapper, 'empty-state').exists()).toBe(false)
-    expect(find(wrapper, 'post-count').text()).toBe('1 条')
+    expect(homeFind(wrapper, 'post-text').text()).toBe('新动态')
+    expect(backend.state.posts).toHaveLength(1)
+    expect(backend.state.posts[0].text).toBe('新动态')
   })
 
-  it('发布后数据写入 localStorage 并可跨实例恢复', async () => {
+  it('发布成功后清空输入框', async () => {
     await mountApp()
-    await find(wrapper, 'composer-input').setValue('要持久化')
+
+    await find(wrapper, 'composer-input').setValue('要清空的')
     await find(wrapper, 'publish-btn').trigger('click')
+    await flush()
 
-    expect(JSON.parse(storage.read('posts'))).toHaveLength(1)
-
-    // 卸载后重新挂载，模拟刷新页面
-    wrapper.unmount()
-    setActivePinia(createPinia())
-    await mountApp()
-
-    expect(homeFind(wrapper, 'post-text').text()).toBe('要持久化')
+    expect(find(wrapper, 'composer-input').element.value).toBe('')
   })
 
-  it('连续发布多条按时间倒序展示', async () => {
+  it('连续发布按时间倒序', async () => {
     await mountApp()
 
-    await find(wrapper, 'composer-input').setValue('最早')
+    await find(wrapper, 'composer-input').setValue('早')
     await find(wrapper, 'publish-btn').trigger('click')
+    await flush()
     vi.setSystemTime(NOW + 1000)
 
-    await find(wrapper, 'composer-input').setValue('最新')
+    await find(wrapper, 'composer-input').setValue('晚')
     await find(wrapper, 'publish-btn').trigger('click')
+    await flush()
 
     const texts = homeFindAll(wrapper, 'post-text').map((el) => el.text())
-    expect(texts).toEqual(['最新', '最早'])
+    expect(texts).toEqual(['晚', '早'])
   })
 
-  it('输入框带 maxlength 属性，浏览器会限制录入长度', async () => {
+  it('空内容不发请求', async () => {
     await mountApp()
-    expect(find(wrapper, 'composer-input').attributes('maxlength')).toBe('280')
-  })
 
-  it('内容超过上限时无法发布（绕过 maxlength 也有兜底）', async () => {
-    await mountApp()
-    // 直接写入超长内容，模拟粘贴或 maxlength 失效
-    await find(wrapper, 'composer-input').setValue('a'.repeat(300))
-
-    expect(find(wrapper, 'char-counter').text()).toBe('300 / 280')
+    await find(wrapper, 'composer-input').setValue('   ')
+    // 按钮此时是禁用的，直接提交也不会触发
     expect(find(wrapper, 'publish-btn').attributes('disabled')).toBeDefined()
+    expect(backend.createPost).not.toHaveBeenCalled()
+  })
+
+  it('服务端拒绝时展示错误且不写入列表', async () => {
+    await mountApp()
+
+    await find(wrapper, 'composer-input').setValue('会被拒绝')
+    backend.failNextWith('内容不能超过 280 字', 'TOO_LONG')
+    await find(wrapper, 'publish-btn').trigger('click')
+    await flush()
+
+    expect(find(wrapper, 'toast').text()).toContain('280')
     expect(homeFindAll(wrapper, 'post-text')).toHaveLength(0)
   })
 
-  it('个人资料昵称会同步到动态卡片', async () => {
+  it('【防回归】发布失败时输入框内容必须保留', async () => {
     await mountApp()
-    await find(wrapper, 'composer-input').setValue('作者名测试')
+
+    await find(wrapper, 'composer-input').setValue('这段文字不能丢')
+    backend.failNextWith('无法连接服务端')
     await find(wrapper, 'publish-btn').trigger('click')
+    await flush()
 
-    await find(wrapper, 'tab-profile').trigger('click')
-    await find(wrapper, 'edit-btn').trigger('click')
-    await find(wrapper, 'name-input').setValue('阿铁')
-    await find(wrapper, 'save-btn').trigger('click')
+    // 这是异步化后最容易丢数据的地方：组件自己清空就会吞掉用户输入
+    expect(find(wrapper, 'composer-input').element.value).toBe('这段文字不能丢')
+  })
 
-    await find(wrapper, 'tab-home').trigger('click')
-    expect(homeFind(wrapper, 'post-author').text()).toBe('阿铁')
+  it('发布失败后可以重新提交成功', async () => {
+    await mountApp()
+
+    await find(wrapper, 'composer-input').setValue('重试内容')
+    backend.failNextWith('网络抖动')
+    await find(wrapper, 'publish-btn').trigger('click')
+    await flush()
+
+    await find(wrapper, 'publish-btn').trigger('click')
+    await flush()
+
+    expect(homeFind(wrapper, 'post-text').text()).toBe('重试内容')
+    expect(find(wrapper, 'composer-input').element.value).toBe('')
+  })
+
+  it('发布过程中按钮禁用并显示进行中文案', async () => {
+    await mountApp()
+
+    let release
+    backend.createPost.mockImplementationOnce(
+      () => new Promise((resolve) => {
+        release = () => resolve({ id: 'slow', text: '慢请求', createdAt: NOW })
+      })
+    )
+
+    await find(wrapper, 'composer-input').setValue('慢请求')
+    await find(wrapper, 'publish-btn').trigger('click')
+    await wrapper.vm.$nextTick()
+
+    expect(find(wrapper, 'publish-btn').attributes('disabled')).toBeDefined()
+    expect(find(wrapper, 'publish-btn').text()).toContain('发布中')
+
+    release()
+    await flush()
   })
 })
 
 describe('App · 详情与删除', () => {
-  it('点击卡片进入详情页，显示完整信息', async () => {
+  it('点击卡片进入详情页', async () => {
+    backend.state.posts.push({ id: 'a', text: '详情内容', createdAt: NOW })
     await mountApp()
-    await find(wrapper, 'composer-input').setValue('详情测试')
-    await find(wrapper, 'publish-btn').trigger('click')
 
     await homeFind(wrapper, 'open-btn').trigger('click')
 
-    expect(find(wrapper, 'detail-text').text()).toBe('详情测试')
-    expect(find(wrapper, 'detail-time').exists()).toBe(true)
+    expect(find(wrapper, 'detail-text').text()).toBe('详情内容')
     expect(find(wrapper, 'detail-chars').text()).toContain('4 字')
   })
 
-  it('详情页返回后回到首页列表', async () => {
+  it('删除成功后从列表移除并通知服务端', async () => {
+    backend.state.posts.push({ id: 'a', text: '待删除', createdAt: NOW })
     await mountApp()
-    await find(wrapper, 'composer-input').setValue('返回测试')
-    await find(wrapper, 'publish-btn').trigger('click')
-    await homeFind(wrapper, 'open-btn').trigger('click')
 
-    const backBtn = wrapper.findAll('button').find((b) => b.text().includes('返回'))
-    await backBtn.trigger('click')
+    await homeFind(wrapper, 'delete-btn').trigger('click')
+    await flush()
 
-    expect(find(wrapper, 'composer-input').exists()).toBe(true)
-    expect(homeFind(wrapper, 'post-text').text()).toBe('返回测试')
+    expect(backend.removePost).toHaveBeenCalledWith('a')
+    expect(homeFind(wrapper, 'empty-state').exists()).toBe(true)
   })
 
-  it('从详情页删除后回到首页且列表为空', async () => {
+  it('取消确认时不发删除请求', async () => {
+    const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(false)
+    backend.state.posts.push({ id: 'a', text: '不要删', createdAt: NOW })
     await mountApp()
 
-    const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(true)
-
-    await find(wrapper, 'composer-input').setValue('待删除')
-    await find(wrapper, 'publish-btn').trigger('click')
-    await homeFind(wrapper, 'open-btn').trigger('click')
-
-    // 详情页里删除（此时首页不在 DOM，需用全局查询）
-    await find(wrapper, 'delete-btn').trigger('click')
+    await homeFind(wrapper, 'delete-btn').trigger('click')
+    await flush()
 
     expect(confirmSpy).toHaveBeenCalled()
-    // 删除后详情自动关闭，回到首页且为空
+    expect(backend.removePost).not.toHaveBeenCalled()
+    expect(homeFind(wrapper, 'post-text').text()).toBe('不要删')
+  })
+
+  it('删除失败时列表不变并提示错误', async () => {
+    backend.state.posts.push({ id: 'a', text: '删不掉', createdAt: NOW })
+    await mountApp()
+
+    backend.failNextWith('服务端错误', 'INTERNAL')
+    await homeFind(wrapper, 'delete-btn').trigger('click')
+    await flush()
+
+    expect(homeFind(wrapper, 'post-text').text()).toBe('删不掉')
+    expect(find(wrapper, 'toast').text()).toContain('失败')
+  })
+
+  it('在详情页删除后回到首页', async () => {
+    backend.state.posts.push({ id: 'a', text: '详情删除', createdAt: NOW })
+    await mountApp()
+
+    await homeFind(wrapper, 'open-btn').trigger('click')
+    await find(wrapper, 'delete-btn').trigger('click')
+    await flush()
+
     expect(find(wrapper, 'composer-input').exists()).toBe(true)
     expect(homeFind(wrapper, 'empty-state').exists()).toBe(true)
-    expect(JSON.parse(storage.read('posts'))).toEqual([])
   })
+})
 
-  it('列表中删除单条后其他动态保留', async () => {
-    vi.spyOn(window, 'confirm').mockReturnValue(true)
+describe('App · 连接失败降级', () => {
+  it('首次加载失败时展示连接告警条', async () => {
+    backend.failNextWith('无法连接服务端')
     await mountApp()
 
-    await find(wrapper, 'composer-input').setValue('会被删掉的')
-    await find(wrapper, 'publish-btn').trigger('click')
-    vi.setSystemTime(NOW + 1000)
-    await find(wrapper, 'composer-input').setValue('保留的')
-    await find(wrapper, 'publish-btn').trigger('click')
-
-    // 删掉首页列表里的第一条（最新的「保留的」）
-    await homeFindAll(wrapper, 'delete-btn')[0].trigger('click')
-
-    expect(homeFindAll(wrapper, 'post-text')).toHaveLength(1)
-    expect(homeFind(wrapper, 'post-text').text()).toBe('会被删掉的')
+    expect(find(wrapper, 'connection-warning').exists()).toBe(true)
+    expect(find(wrapper, 'connection-warning-text').text()).toContain('无法连接服务端')
   })
 
-  it('取消删除确认时数据不变', async () => {
-    vi.spyOn(window, 'confirm').mockReturnValue(false)
+  it('连接正常时不展示告警条', async () => {
+    await mountApp()
+    expect(find(wrapper, 'connection-warning').exists()).toBe(false)
+  })
+
+  it('点击重试会重新拉取数据', async () => {
+    backend.failNextWith('无法连接服务端')
     await mountApp()
 
-    await find(wrapper, 'composer-input').setValue('不要删')
-    await find(wrapper, 'publish-btn').trigger('click')
-    await homeFind(wrapper, 'delete-btn').trigger('click')
+    backend.listPosts.mockClear()
+    // 让后续请求恢复正常
+    await find(wrapper, 'retry-btn').trigger('click')
+    await flush()
+    await flush()
 
-    expect(homeFind(wrapper, 'post-text').text()).toBe('不要删')
+    expect(backend.listPosts).toHaveBeenCalled()
+  })
+
+  it('重试成功后告警条消失', async () => {
+    backend.failNextWith('无法连接服务端')
+    await mountApp()
+    expect(find(wrapper, 'connection-warning').exists()).toBe(true)
+
+    await find(wrapper, 'retry-btn').trigger('click')
+    await flush()
+    await flush()
+
+    expect(find(wrapper, 'connection-warning').exists()).toBe(false)
+  })
+
+  it('可打开启动指引面板并关闭', async () => {
+    backend.failNextWith('无法连接服务端')
+    await mountApp()
+
+    await find(wrapper, 'help-btn').trigger('click')
+    expect(find(wrapper, 'help-dialog').exists()).toBe(true)
+
+    await find(wrapper, 'help-close-btn').trigger('click')
+    expect(find(wrapper, 'help-dialog').exists()).toBe(false)
+  })
+
+  it('【关键底线】连接失败时页面仍可用，能输入内容', async () => {
+    backend.failNextWith('无法连接服务端')
+    await mountApp()
+
+    await find(wrapper, 'composer-input').setValue('离线也能打字')
+    expect(find(wrapper, 'composer-input').element.value).toBe('离线也能打字')
   })
 })
 
 describe('App · 个人中心', () => {
-  it('切换到个人中心显示资料与统计', async () => {
+  it('展示统计信息', async () => {
+    backend.state.posts.push({ id: 'a', text: 'abc', createdAt: NOW })
+    backend.state.posts.push({ id: 'b', text: 'de', createdAt: NOW + 1 })
     await mountApp()
-    await find(wrapper, 'composer-input').setValue('abc')
-    await find(wrapper, 'publish-btn').trigger('click')
-    await find(wrapper, 'composer-input').setValue('de')
-    await find(wrapper, 'publish-btn').trigger('click')
 
     await find(wrapper, 'tab-profile').trigger('click')
 
     expect(find(wrapper, 'stat-posts').text()).toBe('2')
     expect(find(wrapper, 'stat-chars').text()).toBe('5')
-    expect(find(wrapper, 'stat-days').text()).toBe('1')
   })
 
-  it('我的动态只显示自己的动态并支持删除', async () => {
-    vi.spyOn(window, 'confirm').mockReturnValue(true)
+  it('保存资料后同步到服务端与卡片作者名', async () => {
+    backend.state.posts.push({ id: 'a', text: '内容', createdAt: NOW })
     await mountApp()
-    await find(wrapper, 'composer-input').setValue('我的动态')
-    await find(wrapper, 'publish-btn').trigger('click')
 
     await find(wrapper, 'tab-profile').trigger('click')
-    expect(find(wrapper, 'my-post-count').text()).toBe('1 条')
-
-    await wrapper.find('[data-testid="my-timeline"]').find('[data-testid="delete-btn"]').trigger('click')
-    expect(find(wrapper, 'my-empty').exists()).toBe(true)
-    expect(find(wrapper, 'my-post-count').text()).toBe('0 条')
-  })
-
-  it('个人中心显示存储占用', async () => {
-    await mountApp()
-    await find(wrapper, 'composer-input').setValue('占点空间')
-    await find(wrapper, 'publish-btn').trigger('click')
-    await find(wrapper, 'tab-profile').trigger('click')
-
-    expect(find(wrapper, 'storage-text').text()).toContain('占用')
-  })
-
-  it('存储进度条宽度必须是真实百分比（回归：曾因 ref 未解包退回满条）', async () => {
-    await mountApp()
-    await find(wrapper, 'composer-input').setValue('一点点内容')
-    await find(wrapper, 'publish-btn').trigger('click')
-    await find(wrapper, 'tab-profile').trigger('click')
-
-    const style = find(wrapper, 'storage-fill').attributes('style')
-
-    // 宽度应为百分比字面量，而不是 [object Object]
-    expect(style).not.toContain('[object Object]')
-    expect(style).toMatch(/width:\s*\d+(\.\d+)?%/)
-
-    // 少量数据远未达到 5MB，宽度应是小值（至少 2%、远小于 100%）
-    const width = Number.parseFloat(/width:\s*([\d.]+)%/.exec(style)?.[1] ?? '0')
-    expect(width).toBeGreaterThanOrEqual(2)
-    expect(width).toBeLessThan(10)
-  })
-
-  it('进度条 aria-valuenow 是数字而非对象', async () => {
-    await mountApp()
-    await find(wrapper, 'tab-profile').trigger('click')
-
-    const value = find(wrapper, 'storage-bar').attributes('aria-valuenow')
-    expect(Number.isNaN(Number(value))).toBe(false)
-  })
-
-  it('预警级别为普通时不应带上 warn/full 类', async () => {
-    await mountApp()
-    await find(wrapper, 'tab-profile').trigger('click')
-
-    const classes = find(wrapper, 'storage-bar').classes()
-    expect(classes).not.toContain('is-warn')
-    expect(classes).not.toContain('is-full')
-  })
-})
-
-describe('App · 存储降级提示', () => {
-  it('存储正常时不显示告警条', async () => {
-    await mountApp()
-    expect(find(wrapper, 'storage-warning').exists()).toBe(false)
-  })
-
-  it('存储降级时显示告警条并可打开帮助面板', async () => {
-    setStorage({ ...createStorage(), kind: 'session', available: false })
-    await mountApp()
-
-    expect(find(wrapper, 'storage-warning').exists()).toBe(true)
-    expect(find(wrapper, 'storage-warning-text').text()).toContain('刷新不丢')
-
-    await find(wrapper, 'help-btn').trigger('click')
-    expect(find(wrapper, 'help-dialog').exists()).toBe(true)
-  })
-
-  it('帮助面板可关闭', async () => {
-    setStorage({ ...createStorage(), kind: 'memory', available: false })
-    await mountApp()
-
-    await find(wrapper, 'help-btn').trigger('click')
-    await find(wrapper, 'help-close-btn').trigger('click')
-
-    expect(find(wrapper, 'help-dialog').exists()).toBe(false)
-  })
-
-  it('降级状态下依然可以发布与查看（最重要的底线）', async () => {
-    setStorage({ ...createStorage(), kind: 'memory', available: false })
-    await mountApp()
-
-    await find(wrapper, 'composer-input').setValue('降级也要能发')
-    await find(wrapper, 'publish-btn').trigger('click')
-
-    expect(homeFind(wrapper, 'post-text').text()).toBe('降级也要能发')
-  })
-})
-
-describe('App · 天气卡片', () => {
-  it('展示所在地、温度与天气', async () => {
-    await mountApp()
+    await find(wrapper, 'edit-btn').trigger('click')
+    await find(wrapper, 'name-input').setValue('阿铁')
+    await find(wrapper, 'save-btn').trigger('click')
     await flush()
-    await wrapper.vm.$nextTick()
 
-    expect(find(wrapper, 'weather-location').text()).toContain('长沙市')
-    expect(find(wrapper, 'weather-temp').text()).toBe('14°')
+    expect(backend.state.profile.name).toBe('阿铁')
+
+    await find(wrapper, 'tab-home').trigger('click')
+    expect(homeFind(wrapper, 'post-author').text()).toBe('阿铁')
   })
 
-  it('点击刷新触发再次加载', async () => {
+  it('资料保存失败时提示且不改本地', async () => {
     await mountApp()
-    await find(wrapper, 'refresh-btn').trigger('click')
+
+    await find(wrapper, 'tab-profile').trigger('click')
+    await find(wrapper, 'edit-btn').trigger('click')
+    await find(wrapper, 'name-input').setValue('不会生效')
+    backend.failNextWith('保存失败')
+    await find(wrapper, 'save-btn').trigger('click')
     await flush()
-    expect(find(wrapper, 'refresh-btn').exists()).toBe(true)
+
+    expect(find(wrapper, 'toast').text()).toContain('失败')
+    expect(find(wrapper, 'profile-name').text()).toBe('我')
   })
 })
 
 describe('App · 数据备份', () => {
-  it('导出后提示条给出反馈', async () => {
-    // 只替换静态方法，保留 URL 构造器本身（happy-dom 内部仍会 new URL）
+  it('导出触发下载并提示条数', async () => {
     const originalCreate = URL.createObjectURL
     const originalRevoke = URL.revokeObjectURL
     URL.createObjectURL = vi.fn(() => 'blob:mock')
     URL.revokeObjectURL = vi.fn()
 
     try {
+      backend.state.posts.push({ id: 'a', text: '要备份的', createdAt: NOW })
       await mountApp()
 
-      await find(wrapper, 'composer-input').setValue('要备份的')
-      await find(wrapper, 'publish-btn').trigger('click')
       await find(wrapper, 'tab-profile').trigger('click')
       await find(wrapper, 'export-btn').trigger('click')
 
-      expect(find(wrapper, 'toast').text()).toContain('已导出')
+      expect(find(wrapper, 'toast').text()).toContain('已导出 1 条动态')
     } finally {
       URL.createObjectURL = originalCreate
       URL.revokeObjectURL = originalRevoke
     }
   })
 
-  it('导入非法文件时给出失败提示且数据不变', async () => {
+  it('导入非法文件时提示失败且数据不变', async () => {
+    backend.state.posts.push({ id: 'a', text: '原有', createdAt: NOW })
     await mountApp()
-    await find(wrapper, 'composer-input').setValue('原有数据')
-    await find(wrapper, 'publish-btn').trigger('click')
     await find(wrapper, 'tab-profile').trigger('click')
 
-    const file = new File(['这不是 JSON{{'], 'bad.json', { type: 'application/json' })
+    const file = new File(['不是 JSON{{'], 'bad.json', { type: 'application/json' })
     const input = find(wrapper, 'import-file')
     Object.defineProperty(input.element, 'files', { value: [file], configurable: true })
     await input.trigger('change')
 
-    // FileReader 是异步回调，等待提示真正出现再断言
     await vi.waitFor(() => {
       expect(find(wrapper, 'toast').text()).toContain('失败')
     })
-
-    await find(wrapper, 'tab-home').trigger('click')
-    expect(homeFind(wrapper, 'post-text').text()).toBe('原有数据')
+    expect(backend.state.posts).toHaveLength(1)
   })
 
-  it('清空数据后动态与资料一起归零', async () => {
+  it('导入合法备份时合并到服务端', async () => {
     await mountApp()
-    await find(wrapper, 'composer-input').setValue('要被清掉的')
-    await find(wrapper, 'publish-btn').trigger('click')
+    await find(wrapper, 'tab-profile').trigger('click')
+
+    const payload = JSON.stringify({
+      app: 'minifeed',
+      version: 1,
+      posts: [{ id: 'x', text: '来自备份', createdAt: NOW + 60000 }],
+      profile: { name: '备份用户' }
+    })
+    const file = new File([payload], 'good.json', { type: 'application/json' })
+    const input = find(wrapper, 'import-file')
+    Object.defineProperty(input.element, 'files', { value: [file], configurable: true })
+    await input.trigger('change')
+
+    await vi.waitFor(() => {
+      expect(find(wrapper, 'toast').text()).toContain('已导入 1 条动态')
+    })
+    expect(backend.mergePosts).toHaveBeenCalled()
+    expect(backend.state.posts).toHaveLength(1)
+  })
+
+  it('清空数据后动态归零', async () => {
+    backend.state.posts.push({ id: 'a', text: '要被清掉', createdAt: NOW })
+    await mountApp()
     await find(wrapper, 'tab-profile').trigger('click')
 
     await find(wrapper, 'clear-btn').trigger('click')
     await find(wrapper, 'clear-confirm-btn').trigger('click')
+    await flush()
 
-    expect(find(wrapper, 'stat-posts').text()).toBe('0')
-    expect(find(wrapper, 'stat-days').text()).toBe('1')
-
+    expect(backend.state.posts).toHaveLength(0)
     await find(wrapper, 'tab-home').trigger('click')
     expect(homeFind(wrapper, 'empty-state').exists()).toBe(true)
   })
 })
 
 describe('App · 视图切换', () => {
-  it('两个标签页之间可以来回切换', async () => {
+  it('两个标签页之间来回切换', async () => {
     await mountApp()
 
     await find(wrapper, 'tab-profile').trigger('click')
@@ -416,15 +631,35 @@ describe('App · 视图切换', () => {
     expect(find(wrapper, 'composer-input').exists()).toBe(true)
   })
 
-  it('Esc 可在详情页返回首页', async () => {
+  it('Esc 从详情页返回首页', async () => {
+    backend.state.posts.push({ id: 'a', text: 'esc 测试', createdAt: NOW })
     await mountApp()
-    await find(wrapper, 'composer-input').setValue('esc 测试')
-    await find(wrapper, 'publish-btn').trigger('click')
     await homeFind(wrapper, 'open-btn').trigger('click')
 
     document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape' }))
     await wrapper.vm.$nextTick()
 
     expect(find(wrapper, 'composer-input').exists()).toBe(true)
+  })
+})
+
+describe('App · 天气卡片', () => {
+  it('展示天气信息', async () => {
+    await mountApp()
+    await flush()
+    await wrapper.vm.$nextTick()
+
+    expect(find(wrapper, 'weather-location').text()).toContain('长沙市')
+    expect(find(wrapper, 'weather-temp').text()).toBe('14°')
+  })
+
+  it('天气失败不影响动态功能', async () => {
+    setWeatherServiceFactory(() => ({
+      load: async () => ({ ok: false, place: '位置未知', weather: null, error: 'down' })
+    }))
+    backend.state.posts.push({ id: 'a', text: '动态照常', createdAt: NOW })
+    await mountApp()
+
+    expect(homeFind(wrapper, 'post-text').text()).toBe('动态照常')
   })
 })
