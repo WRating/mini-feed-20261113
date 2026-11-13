@@ -41,3 +41,23 @@ export const ERROR_CODES = {
   NOT_FOUND: 'NOT_FOUND',
   BAD_JSON: 'BAD_JSON'
 }
+
+/* ==================== 点赞与收藏 ==================== */
+
+/** 可切换的互动类型 —— 前后端与 URL 参数共用，避免各自写字符串字面量 */
+export const REACTION_KINDS = ['like', 'favorite']
+
+/**
+ * 互动动作。
+ * POST 用 Toggle（幂等地从"有"变成"无"、从"无"变成"有"），
+ * PUT/DELETE 用于备份导入这种需要明确指定目标状态的场景 —— 重复导入同一份
+ * 备份必须得到相同结果，用 toggle 会反复翻转。
+ */
+export const REACTION_ACTIONS = { TOGGLE: 'toggle', ADD: 'add', REMOVE: 'remove' }
+
+/** 单条动态的空互动状态，用于断言与兜底 */
+export const EMPTY_REACTIONS = { likes: 0, favorites: 0, liked: false, favorited: false }
+
+/** 备份文件结构版本。v1 没有互动字段，v2 起附带 reactions */
+export const BACKUP_VERSION = 2
+
