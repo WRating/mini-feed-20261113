@@ -32,7 +32,7 @@ function withSetup(composable) {
 /** 造一个可控的 api 替身 */
 function fakeApi(overrides = {}) {
   return {
-    getStats: vi.fn(async () => ({ posts: 3, chars: 42, bytes: 812 })),
+    getStats: vi.fn(async () => ({ posts: 3, chars: 42, bytes: 812, likes: 7, favorites: 2 })),
     ...overrides
   }
 }
@@ -91,10 +91,66 @@ describe('useServerStats · 成功路径', () => {
     await result.refresh()
 
     const view = result.view.value
-    expect(view).toEqual({ posts: 3, chars: 42, bytes: 812, formatted: '812 B' })
+    expect(view).toEqual({
+      posts: 3,
+      chars: 42,
+      bytes: 812,
+      likes: 7,
+      favorites: 2,
+      formatted: '812 B'
+    })
     // 必须是普通值，不是 ref —— 否则 prop 传到子组件里 :style/:class 会失效
     expect(typeof view.posts).toBe('number')
     expect(typeof view.formatted).toBe('string')
+    wrapper.unmount()
+  })
+})
+
+describe('useServerStats · 累计互动（契约 4.2）', () => {
+  it('把 likes / favorites 读进状态并透传给 view', async () => {
+    setStatsApiFactory(() => fakeApi())
+    const { result, wrapper } = withSetup(() => useServerStats())
+
+    await result.refresh()
+
+    expect(result.likes.value).toBe(7)
+    expect(result.favorites.value).toBe(2)
+    expect(result.view.value.likes).toBe(7)
+    expect(result.view.value.favorites).toBe(2)
+    wrapper.unmount()
+  })
+
+  it('缺少互动字段时按 0 处理，不产生 undefined/NaN', async () => {
+    // 后端若还没升级到带互动的版本，统计行仍要能正常渲染
+    setStatsApiFactory(() => fakeApi({ getStats: vi.fn(async () => ({ posts: 1, chars: 1, bytes: 1 })) }))
+    const { result, wrapper } = withSetup(() => useServerStats())
+
+    await result.refresh()
+
+    expect(result.likes.value).toBe(0)
+    expect(result.favorites.value).toBe(0)
+    expect(result.view.value.likes).toBe(0)
+    wrapper.unmount()
+  })
+
+  it('互动数是非法值时按 0 处理（不可信输入兜底）', async () => {
+    setStatsApiFactory(() =>
+      fakeApi({ getStats: vi.fn(async () => ({ posts: 1, likes: 'x', favorites: null })) })
+    )
+    const { result, wrapper } = withSetup(() => useServerStats())
+
+    await result.refresh()
+    expect(result.likes.value).toBe(0)
+    expect(result.favorites.value).toBe(0)
+    wrapper.unmount()
+  })
+
+  it('初始 likes / favorites 为 0', () => {
+    setStatsApiFactory(() => fakeApi())
+    const { result, wrapper } = withSetup(() => useServerStats())
+
+    expect(result.likes.value).toBe(0)
+    expect(result.favorites.value).toBe(0)
     wrapper.unmount()
   })
 })

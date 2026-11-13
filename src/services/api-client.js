@@ -17,7 +17,7 @@
  * 4. **工厂 + 依赖注入**：`createApiClient` 接收 `fetchImpl`，测试可注入 fake fetch
  *    而不必 mock 全局；`baseUrl` 默认取共享常量，避免前后端各写一份 `/api`。
  */
-import { API_BASE } from '@shared/constants'
+import { API_BASE, REACTION_ACTIONS } from '@shared/constants'
 
 /** 默认超时：与天气服务的 8000ms 对齐，避免两处出现不同的「卡住」体验 */
 const DEFAULT_TIMEOUT = 8000
@@ -212,6 +212,24 @@ export function createApiClient({
 
     /** 删除单条；204 无体，返回 undefined */
     removePost: (id) => request(`/posts/${encodeURIComponent(id)}`, { method: 'DELETE' }),
+
+    /**
+     * 切换互动状态（点赞 / 收藏），返回更新后的完整 Post（已解包 `data.post`）。
+     *
+     * toggle 是契约里的**默认行为**，因此刻意不发送请求体：
+     * - 少一次序列化，也少一个可能与后端默认值漂移的位置；
+     * - 无 body 时不带 Content-Type，可避免不必要的预检请求。
+     * 只有备份导入这种需要「幂等目标状态」的场景才显式传 action: add / remove。
+     */
+    async setReaction(id, kind, { action = REACTION_ACTIONS.TOGGLE } = {}) {
+      const path = `/posts/${encodeURIComponent(id)}/reactions/${encodeURIComponent(kind)}`
+      const isToggle = action === REACTION_ACTIONS.TOGGLE || action === undefined
+      const data = await request(path, {
+        method: 'POST',
+        body: isToggle ? undefined : { action }
+      })
+      return unwrap(data, 'post')
+    },
 
     /** 合并导入；一并拿到合并后的完整列表，前端可省一次 GET */
     mergePosts: (posts) => request('/posts/merge', { method: 'POST', body: { posts } }),

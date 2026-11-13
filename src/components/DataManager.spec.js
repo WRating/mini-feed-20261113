@@ -13,7 +13,7 @@ import DataManager from './DataManager.vue'
 const find = (wrapper, testid) => wrapper.find(`[data-testid="${testid}"]`)
 
 const baseProps = {
-  stats: { posts: 3, chars: 42, bytes: 812, formatted: '812 B' }
+  stats: { posts: 3, chars: 42, bytes: 812, likes: 7, favorites: 2, formatted: '812 B' }
 }
 
 let wrapper
@@ -31,6 +31,30 @@ describe('DataManager · 展示', () => {
     expect(text).toContain('3 条动态')
     expect(text).toContain('42 字')
     expect(text).toContain('812 B')
+  })
+
+  it('展示累计互动数（契约 4.2 的 likes / favorites）', () => {
+    wrapper = mount(DataManager, { props: baseProps })
+    const text = find(wrapper, 'storage-text').text()
+
+    expect(text).toContain('7 赞')
+    expect(text).toContain('2 收藏')
+  })
+
+  it('互动字段缺省时显示 0 赞 / 0 收藏，不出现 undefined', () => {
+    wrapper = mount(DataManager, { props: { stats: { posts: 1, chars: 3, formatted: '9 B' } } })
+    const text = find(wrapper, 'storage-text').text()
+
+    expect(text).toContain('0 赞')
+    expect(text).toContain('0 收藏')
+    expect(text).not.toContain('undefined')
+  })
+
+  it('完整文案顺序：条数 → 字数 → 赞 → 收藏 → 字节', () => {
+    wrapper = mount(DataManager, { props: baseProps })
+    expect(find(wrapper, 'storage-text').text()).toBe(
+      '服务端数据 · 3 条动态 · 42 字 · 7 赞 · 2 收藏 · 812 B'
+    )
   })
 
   it('字节数使用传入的 formatted 而不是自己换算', () => {

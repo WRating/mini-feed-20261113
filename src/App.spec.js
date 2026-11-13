@@ -17,6 +17,7 @@ import { setPostsApiFactory, resetPostsApiFactory } from '@/stores/posts'
 import { setProfileApiFactory, resetProfileApiFactory } from '@/stores/profile'
 import { setStatsApiFactory, resetStatsApiFactory } from '@/composables/useServerStats'
 import { setWeatherServiceFactory, resetWeatherServiceFactory } from '@/stores/weather'
+import { normalizeReactions, toggleReaction } from '@shared/post-shape'
 
 const NOW = new Date(2026, 10, 13, 10, 0, 0).getTime()
 const find = (wrapper, testid) => wrapper.find(`[data-testid="${testid}"]`)
@@ -57,10 +58,21 @@ function createFakeBackend() {
 
     getStats: vi.fn(async () => {
       maybeThrow()
+      const totals = state.posts.reduce(
+        (acc, p) => {
+          const { likes, favorites } = normalizeReactions(p)
+          acc.likes += likes
+          acc.favorites += favorites
+          return acc
+        },
+        { likes: 0, favorites: 0 }
+      )
       return {
         posts: state.posts.length,
         chars: state.posts.reduce((s, p) => s + p.text.length, 0),
-        bytes: 812
+        bytes: 812,
+        likes: totals.likes,
+        favorites: totals.favorites
       }
     }),
 
@@ -83,7 +95,16 @@ function createFakeBackend() {
         throw error
       }
       seq += 1
-      const post = { id: `srv-${seq}`, text: trimmed, createdAt: Date.now() }
+      // 契约 4.4：新动态的互动字段全为 0 / false
+      const post = {
+        id: `srv-${seq}`,
+        text: trimmed,
+        createdAt: Date.now(),
+        likes: 0,
+        favorites: 0,
+        liked: false,
+        favorited: false
+      }
       state.posts.push(post)
       return post
     }),
@@ -180,6 +201,20 @@ function createFakeBackend() {
       }
       if (typeof source?.avatar === 'string') state.profile.avatar = source.avatar
       return { applied: true, profile: { ...state.profile } }
+    }),
+
+    // 契约 4.13：切换互动状态，返回更新后的完整 Post（服务端是唯一权威）
+    setReaction: vi.fn(async (id, kind) => {
+      maybeThrow()
+      const found = state.posts.find((p) => p.id === id)
+      if (!found) {
+        const error = new Error('动态不存在')
+        error.code = 'NOT_FOUND'
+        throw error
+      }
+      const next = { ...normalizeReactions(found), ...toggleReaction(found, kind) }
+      Object.assign(found, next)
+      return { ...found }
     }),
 
     resetProfile: vi.fn(async () => {
@@ -640,6 +675,127 @@ describe('App · 视图切换', () => {
     await wrapper.vm.$nextTick()
 
     expect(find(wrapper, 'composer-input').exists()).toBe(true)
+  })
+})
+
+describe('App · 点赞与收藏', () => {
+  it('点击点赞后本地立刻高亮，并同步到服务端', async () => {
+    backend.state.posts.push({ id: 'a', text: '点赞我', createdAt: NOW })
+    await mountApp()
+
+    await homeFind(wrapper, 'like-btn').trigger('click')
+    await flush()
+
+    expect(backend.setReaction).toHaveBeenCalledWith('a', 'like')
+    expect(homeFind(wrapper, 'like-btn').classes()).toContain('is-active')
+    expect(homeFind(wrapper, 'like-count').text()).toBe('1')
+    expect(backend.state.posts[0].liked).toBe(true)
+  })
+
+  it('点击收藏后同步到服务端', async () => {
+    backend.state.posts.push({ id: 'a', text: '收藏我', createdAt: NOW })
+    await mountApp()
+
+    await homeFind(wrapper, 'favorite-btn').trigger('click')
+    await flush()
+
+    expect(backend.setReaction).toHaveBeenCalledWith('a', 'favorite')
+    expect(homeFind(wrapper, 'favorite-btn').classes()).toContain('is-active')
+    expect(backend.state.posts[0].favorited).toBe(true)
+  })
+
+  it('再次点击取消互动', async () => {
+    backend.state.posts.push({ id: 'a', text: '切换我', createdAt: NOW })
+    await mountApp()
+
+    await homeFind(wrapper, 'like-btn').trigger('click')
+    await flush()
+    expect(backend.state.posts[0].liked).toBe(true)
+
+    await homeFind(wrapper, 'like-btn').trigger('click')
+    await flush()
+
+    expect(backend.state.posts[0].liked).toBe(false)
+    expect(homeFind(wrapper, 'like-count').text()).toBe('0')
+  })
+
+  it('【防回归】点赞不会打开详情页', async () => {
+    backend.state.posts.push({ id: 'a', text: '不要跳走', createdAt: NOW })
+    await mountApp()
+
+    await homeFind(wrapper, 'like-btn').trigger('click')
+    await flush()
+
+    expect(find(wrapper, 'detail-text').exists()).toBe(false)
+    expect(find(wrapper, 'composer-input').exists()).toBe(true)
+  })
+
+  it('失败时回滚并 toast 提示错误', async () => {
+    backend.state.posts.push({ id: 'a', text: '会失败', createdAt: NOW })
+    await mountApp()
+
+    backend.failNextWith('无法连接服务端')
+    await homeFind(wrapper, 'like-btn').trigger('click')
+    await flush()
+
+    expect(find(wrapper, 'toast').text()).toContain('无法连接服务端')
+    expect(homeFind(wrapper, 'like-btn').classes()).not.toContain('is-active')
+    expect(homeFind(wrapper, 'like-count').text()).toBe('0')
+  })
+
+  it('请求进行中时按钮禁用（防止快速双击把计数打翻）', async () => {
+    backend.state.posts.push({ id: 'a', text: '慢请求', createdAt: NOW })
+    await mountApp()
+
+    let release
+    backend.setReaction.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          release = () =>
+            resolve({ id: 'a', text: '慢请求', createdAt: NOW, likes: 1, favorites: 0, liked: true, favorited: false })
+        })
+    )
+
+    await homeFind(wrapper, 'like-btn').trigger('click')
+    await wrapper.vm.$nextTick()
+
+    expect(homeFind(wrapper, 'like-btn').attributes('disabled')).toBeDefined()
+
+    release()
+    await flush()
+    expect(homeFind(wrapper, 'like-btn').attributes('disabled')).toBeUndefined()
+  })
+
+  it('详情页的互动按钮同步回列表（同一份 store 状态）', async () => {
+    backend.state.posts.push({ id: 'a', text: '详情互动', createdAt: NOW })
+    await mountApp()
+
+    await homeFind(wrapper, 'open-btn').trigger('click')
+    await find(wrapper, 'like-btn').trigger('click')
+    await flush()
+
+    expect(find(wrapper, 'like-btn').classes()).toContain('is-active')
+    expect(backend.state.posts[0].liked).toBe(true)
+
+    // 返回首页后卡片也应是已点赞（同一条数据）
+    await find(wrapper, 'detail-text').trigger('click')
+    document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape' }))
+    await wrapper.vm.$nextTick()
+
+    expect(homeFind(wrapper, 'like-btn').classes()).toContain('is-active')
+  })
+
+  it('互动后刷新统计，个人中心展示累计数', async () => {
+    backend.state.posts.push({ id: 'a', text: '统计我', createdAt: NOW })
+    await mountApp()
+
+    await homeFind(wrapper, 'like-btn').trigger('click')
+    await flush()
+
+    await find(wrapper, 'tab-profile').trigger('click')
+    const text = find(wrapper, 'storage-text').text()
+    expect(text).toContain('1 赞')
+    expect(text).toContain('0 收藏')
   })
 })
 

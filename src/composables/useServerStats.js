@@ -37,6 +37,9 @@ export function useServerStats() {
   const posts = ref(0)
   const chars = ref(0)
   const bytes = ref(0)
+  /** 全部动态的互动数之和（契约 4.2），用于个人中心展示累计互动 */
+  const likes = ref(0)
+  const favorites = ref(0)
 
   const loading = ref(false)
   /** 是否成功拿到过服务端数据（首次成功前为 false，用于隐藏而非显示 0） */
@@ -54,6 +57,8 @@ export function useServerStats() {
     posts: posts.value,
     chars: chars.value,
     bytes: bytes.value,
+    likes: likes.value,
+    favorites: favorites.value,
     formatted: formatted.value
   }))
 
@@ -77,6 +82,10 @@ export function useServerStats() {
       posts.value = Number.isFinite(stats.posts) ? stats.posts : 0
       chars.value = Number.isFinite(stats.chars) ? stats.chars : 0
       bytes.value = Number.isFinite(stats.bytes) ? stats.bytes : 0
+      // 互动字段是 v2 新增的：后端若还没升级（字段缺失）就显示 0，
+      // 而不是让「undefined 赞」出现在界面或让整行渲染失败。
+      likes.value = Number.isFinite(stats.likes) ? stats.likes : 0
+      favorites.value = Number.isFinite(stats.favorites) ? stats.favorites : 0
       available.value = true
     } catch (cause) {
       // 失败不清零：保留上次成功的数字，仅标记不可用
@@ -87,5 +96,5 @@ export function useServerStats() {
     }
   }
 
-  return { posts, chars, bytes, formatted, loading, available, error, view, refresh }
+  return { posts, chars, bytes, likes, favorites, formatted, loading, available, error, view, refresh }
 }

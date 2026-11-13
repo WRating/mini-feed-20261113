@@ -319,6 +319,34 @@ describe('useDataBackup · importBackup', () => {
     await useDataBackup().importBackup(validFile)
     expect(posts.posts[0].text).toBe('备份里的动态')
   })
+
+  it('把互动字段一并交给合并接口（导入语义是以备份为准的目标状态）', async () => {
+    // 契约 4.7：后端按「目标状态」而不是「叠加」处理，因此前端必须把字段原样传下去，
+    // 否则同一份备份导入两次会把计数翻倍。
+    const file = JSON.stringify({
+      version: 2,
+      posts: [{ id: 'x1', text: '带互动', createdAt: NOW + 5000, likes: 3, liked: true, favorites: 1, favorited: true }]
+    })
+
+    await useDataBackup().importBackup(file)
+
+    const sent = api.mergePosts.mock.calls[0][0]
+    expect(sent[0]).toMatchObject({ likes: 3, liked: true, favorites: 1, favorited: true })
+  })
+
+  it('导入 v1 旧备份时互动字段被补成全 0，而不是 undefined', async () => {
+    const file = JSON.stringify({
+      app: 'minifeed',
+      version: 1,
+      posts: [{ id: 'old', text: '老备份', createdAt: NOW + 1000 }]
+    })
+
+    const result = await useDataBackup().importBackup(file)
+
+    expect(result.ok).toBe(true)
+    const sent = api.mergePosts.mock.calls[0][0]
+    expect(sent[0]).toMatchObject({ likes: 0, favorites: 0, liked: false, favorited: false })
+  })
 })
 
 describe('useDataBackup · clearAll', () => {

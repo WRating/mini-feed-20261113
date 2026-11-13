@@ -189,6 +189,92 @@ describe('api-client · 动态', () => {
   })
 })
 
+describe('api-client · 互动（点赞 / 收藏）', () => {
+  const POST = {
+    id: 'p1',
+    text: '你好',
+    createdAt: 1,
+    likes: 1,
+    favorites: 0,
+    liked: true,
+    favorited: false
+  }
+
+  it('setReaction 用 POST 到 /posts/:id/reactions/:kind 并解包 {post}', async () => {
+    fetchImpl.mockResolvedValueOnce(jsonResponse({ post: POST }))
+    const result = await client.setReaction('p1', 'like')
+
+    expect(result).toEqual(POST)
+    const [url, init] = callOf(fetchImpl)
+    expect(url).toBe(`${BASE}/posts/p1/reactions/like`)
+    expect(init.method).toBe('POST')
+  })
+
+  it('action 为 toggle 时不发送请求体（契约里 toggle 是默认行为）', async () => {
+    fetchImpl.mockResolvedValueOnce(jsonResponse({ post: POST }))
+    await client.setReaction('p1', 'like', { action: 'toggle' })
+
+    const [, init] = callOf(fetchImpl)
+    expect(init.body).toBeUndefined()
+    // 没有 body 就不该带 Content-Type，避免触发预检请求
+    expect(init.headers).toBeUndefined()
+  })
+
+  it('缺省 options 同样不带请求体', async () => {
+    fetchImpl.mockResolvedValueOnce(jsonResponse({ post: POST }))
+    await client.setReaction('p1', 'favorite')
+
+    const [, init] = callOf(fetchImpl)
+    expect(init.body).toBeUndefined()
+    expect(callOf(fetchImpl)[0]).toBe(`${BASE}/posts/p1/reactions/favorite`)
+  })
+
+  it('action 为 add / remove 时把目标状态放进请求体（备份导入要幂等）', async () => {
+    const actions = ['add', 'remove']
+    for (const action of actions) {
+      fetchImpl.mockResolvedValueOnce(jsonResponse({ post: POST }))
+    }
+
+    for (const action of actions) {
+      await client.setReaction('p1', 'like', { action })
+    }
+
+    actions.forEach((action, i) => {
+      const [url, init] = callOf(fetchImpl, i)
+      expect(url).toBe(`${BASE}/posts/p1/reactions/like`)
+      expect(JSON.parse(init.body)).toEqual({ action })
+      expect(init.headers['Content-Type']).toContain('application/json')
+    })
+  })
+
+  it('对 id 与 kind 做 URL 编码（避免特殊字符破坏路径）', async () => {
+    fetchImpl.mockResolvedValueOnce(jsonResponse({ post: POST }))
+    await client.setReaction('a/b?c', 'like')
+    expect(callOf(fetchImpl)[0]).toBe(`${BASE}/posts/${encodeURIComponent('a/b?c')}/reactions/like`)
+  })
+
+  it('404 透传 NOT_FOUND（动态被别的标签页删掉了）', async () => {
+    fetchImpl.mockResolvedValueOnce(errorResponse(404, ERROR_CODES.NOT_FOUND, '动态不存在'))
+    const error = await client.setReaction('nope', 'like').catch((e) => e)
+
+    expect(error).toBeInstanceOf(ApiError)
+    expect(error.code).toBe(ERROR_CODES.NOT_FOUND)
+    expect(error.status).toBe(404)
+  })
+
+  it('网络失败归为 NETWORK，不把 undefined 当数据往下传', async () => {
+    fetchImpl.mockRejectedValueOnce(new TypeError('Failed to fetch'))
+    const error = await client.setReaction('p1', 'like').catch((e) => e)
+    expect(error.code).toBe('NETWORK')
+  })
+
+  it('2xx 但缺 post 字段时归为 BAD_RESPONSE', async () => {
+    fetchImpl.mockResolvedValueOnce(jsonResponse({ ok: true }))
+    const error = await client.setReaction('p1', 'like').catch((e) => e)
+    expect(error.code).toBe('BAD_RESPONSE')
+  })
+})
+
 describe('api-client · 个人资料', () => {
   const PROFILE = { name: '我', bio: '这个人很懒，什么都没写。', avatar: '🙂', joinedAt: 1 }
 
