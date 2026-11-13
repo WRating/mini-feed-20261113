@@ -9,55 +9,118 @@
 
   var DAY = 24 * 60 * 60 * 1000;
 
-  /* ==================== 存储层（localStorage 不可用时降级为内存） ==================== */
+  /* ==================== 存储层 ====================
+     优先级：localStorage → sessionStorage → window.name → 内存
+     localStorage 被浏览器拒绝时（常见于 file:// 打开、阻止站点数据），
+     逐级退让，保证数据至少在当前标签页内不丢，且发布链路永不中断。
+     ================================================ */
 
-  var memoryStore = {};
+  var NAME_MARK = "__MINIFEED_STORE__:";
 
-  function probeStorage() {
+  function probeArea(area, label) {
+    if (!area) return false;
     try {
       var key = "__minifeed_probe__";
-      window.localStorage.setItem(key, "1");
-      window.localStorage.removeItem(key);
+      area.setItem(key, "1");
+      area.removeItem(key);
       return true;
     } catch (e) {
       return false;
     }
   }
 
-  var storageOK = probeStorage();
+  function grabArea(label) {
+    try {
+      return window[label] || null;
+    } catch (e) {
+      return null;
+    }
+  }
+
+  /* window.name 不受站点数据策略限制，可作为标签页级兜底容器 */
+  function readNameStore() {
+    try {
+      var raw = window.name || "";
+      if (raw.indexOf(NAME_MARK) === 0) {
+        var obj = JSON.parse(raw.slice(NAME_MARK.length));
+        if (obj && typeof obj === "object") return obj;
+      }
+    } catch (e) {
+      /* 忽略：window.name 内容不可解析时视为空 */
+    }
+    return {};
+  }
+
+  function writeNameStore(map) {
+    try {
+      window.name = NAME_MARK + JSON.stringify(map);
+      return true;
+    } catch (e) {
+      return false;
+    }
+  }
+
+  var memoryStore = {};
+
+  var STORE = (function () {
+    var ls = grabArea("localStorage");
+    if (probeArea(ls, "local")) {
+      return { kind: "local", area: ls };
+    }
+    var ss = grabArea("sessionStorage");
+    if (probeArea(ss, "session")) {
+      return { kind: "session", area: ss };
+    }
+    /* 两者都被禁：退到标签页级 window.name */
+    memoryStore = readNameStore();
+    if (writeNameStore(memoryStore)) {
+      return { kind: "tab", area: null };
+    }
+    return { kind: "memory", area: null };
+  })();
+
+  function storageAvailable() {
+    return STORE.kind === "local";
+  }
 
   function readRaw(key) {
-    if (storageOK) {
+    if (STORE.area) {
       try {
-        return window.localStorage.getItem(key);
+        return STORE.area.getItem(key);
       } catch (e) {
-        storageOK = false;
+        /* 运行时被回收，退到内存 */
+        return Object.prototype.hasOwnProperty.call(memoryStore, key) ? memoryStore[key] : null;
       }
     }
     return Object.prototype.hasOwnProperty.call(memoryStore, key) ? memoryStore[key] : null;
   }
 
   function writeRaw(key, value) {
-    if (storageOK) {
+    if (STORE.area) {
       try {
-        window.localStorage.setItem(key, value);
+        STORE.area.setItem(key, value);
         return;
       } catch (e) {
-        storageOK = false;
+        /* 配额满或被回收：退到内存 + window.name，保证不抛异常 */
+        memoryStore[key] = value;
+        writeNameStore(memoryStore);
+        return;
       }
     }
     memoryStore[key] = value;
+    writeNameStore(memoryStore);
   }
 
   function removeRaw(key) {
-    if (storageOK) {
+    if (STORE.area) {
       try {
-        window.localStorage.removeItem(key);
+        STORE.area.removeItem(key);
       } catch (e) {
-        storageOK = false;
+        /* 忽略 */
       }
     }
     delete memoryStore[key];
+    if (!STORE.area) writeNameStore(memoryStore);
   }
 
   /* ==================== 数据层 ==================== */
@@ -176,6 +239,13 @@
   var backBtn = document.getElementById("back-btn");
   var clearAllBtn = document.getElementById("clear-all-btn");
   var storageWarning = document.getElementById("storage-warning");
+  var storageWarningText = document.getElementById("storage-warning-text");
+  var storageHelpBtn = document.getElementById("storage-help-btn");
+  var storageHelp = document.getElementById("storage-help");
+  var storageHelpTitle = document.getElementById("storage-help-title");
+  var storageHelpReason = document.getElementById("storage-help-reason");
+  var helpCmdEl = document.getElementById("help-cmd");
+  var copyCmdBtn = document.getElementById("copy-cmd-btn");
   var storageText = document.getElementById("storage-text");
   var storageFill = document.getElementById("storage-fill");
   var storageBar = storageFill ? storageFill.parentNode : null;
@@ -487,11 +557,11 @@
 
   function storageUsage() {
     var bytes = 0;
-    if (!storageOK) return 0;
+    if (!STORE.area) return 0;
     try {
-      Object.keys(window.localStorage).forEach(function (key) {
+      Object.keys(STORE.area).forEach(function (key) {
         if (key.indexOf("minifeed.") !== 0) return;
-        var value = window.localStorage.getItem(key) || "";
+        var value = STORE.area.getItem(key) || "";
         bytes += (key.length + value.length) * 2; // UTF-16 每字符占 2 字节
       });
     } catch (e) {
@@ -512,16 +582,107 @@
       storageBar.classList.toggle("is-full", pct >= 90);
     }
 
-    if (!storageOK) {
-      storageText.textContent = "本地存储不可用，当前为内存模式";
-    } else if (pct >= 90) {
-      storageText.textContent = "占用 " + formatBytes(used) + " / 约 5 MB · 接近上限";
+    if (STORE.kind === "local") {
+      if (pct >= 90) {
+        storageText.textContent = "占用 " + formatBytes(used) + " / 约 5 MB · 接近上限";
+      } else {
+        storageText.textContent = "占用 " + formatBytes(used) + " / 约 5 MB";
+      }
+    } else if (STORE.kind === "memory") {
+      storageText.textContent = "内存模式 · 刷新或关闭后丢失";
     } else {
-      storageText.textContent = "占用 " + formatBytes(used) + " / 约 5 MB";
+      storageText.textContent = "仅当前标签页 · 关闭标签页后丢失";
     }
   }
 
-  /* ==================== 提示条 ==================== */
+  /* ==================== 存储状态提示与排查面板 ==================== */
+
+  var STORAGE_NOTICE = {
+    session: "⚠️ 浏览器禁用了本地存储，动态暂存在当前标签页：刷新不丢，关闭标签页后会丢失。",
+    tab: "⚠️ 浏览器禁用了本地存储，动态暂存在当前标签页：刷新不丢，关闭标签页后会丢失。",
+    memory: "⚠️ 浏览器完全禁止了站点数据，动态只存在内存里：刷新或关闭都会丢失。"
+  };
+
+  var STORAGE_REASON = {
+    session: "Local Storage 被浏览器拒绝（常见于 file:// 直接打开、或限制了站点数据）。改用本地服务器访问即可恢复正常保存。",
+    tab: "Local Storage 与 Session Storage 都被拒绝，当前退到标签页级容器。改用本地服务器访问即可恢复正常保存。",
+    memory: "浏览器拒绝了所有站点数据写入。除了改用本地服务器访问，还需检查是否开启了「阻止所有 Cookie」或处于无痕模式。"
+  };
+
+  function buildStartCommand() {
+    var path = "";
+    if (location.protocol === "file:") {
+      try {
+        path = decodeURIComponent(location.pathname).replace(/\/[^/]*$/, "");
+        if (/^\/[A-Za-z]:/.test(path)) path = path.slice(1).replace(/\//g, "\\");
+      } catch (e) {
+        path = "";
+      }
+    }
+    if (!path) path = "项目目录";
+    return 'cd /d "' + path + '"\npython -m http.server 8000';
+  }
+
+  function fallbackCopy(text) {
+    var ta = document.createElement("textarea");
+    ta.value = text;
+    ta.setAttribute("readonly", "");
+    ta.style.position = "fixed";
+    ta.style.opacity = "0";
+    document.body.appendChild(ta);
+    ta.select();
+    try {
+      document.execCommand("copy");
+    } catch (e) {
+      /* 忽略：复制失败时用户可手动选择 */
+    }
+    document.body.removeChild(ta);
+  }
+
+  function copyText(text) {
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      return navigator.clipboard.writeText(text).catch(function () {
+        fallbackCopy(text);
+      });
+    }
+    fallbackCopy(text);
+    return Promise.resolve();
+  }
+
+  function openStorageHelp() {
+    if (!storageHelp) return;
+
+    var isFile = location.protocol === "file:";
+
+    /* 服务器相关的两步只在 file:// 场景有意义 */
+    Array.prototype.forEach.call(document.querySelectorAll(".step-server"), function (el) {
+      el.classList.toggle("hidden", !isFile);
+    });
+
+    if (storageHelpTitle) {
+      storageHelpTitle.textContent = isFile ? "让数据保存下来" : "浏览器阻止了数据保存";
+    }
+
+    if (storageHelpReason) {
+      if (isFile) {
+        storageHelpReason.textContent = STORAGE_REASON[STORE.kind] || STORAGE_REASON.session;
+      } else if (STORE.kind === "memory") {
+        storageHelpReason.textContent = STORAGE_REASON.memory;
+      } else {
+        storageHelpReason.textContent =
+          "页面已经通过 http:// 正常访问，但浏览器仍然拒绝了站点数据写入，通常是隐私设置、无痕模式或防护类扩展导致。";
+      }
+    }
+
+    if (helpCmdEl) helpCmdEl.textContent = buildStartCommand();
+    storageHelp.classList.remove("hidden");
+  }
+
+  function closeStorageHelp() {
+    if (storageHelp) storageHelp.classList.add("hidden");
+  }
+
+  /* ==================== 提醒气泡 ==================== */
 
   var toastTimer = null;
 
@@ -714,9 +875,27 @@
     if (file) importData(file);
   });
 
+  if (storageHelpBtn) {
+    storageHelpBtn.addEventListener("click", openStorageHelp);
+  }
+
+  Array.prototype.forEach.call(document.querySelectorAll("[data-close-help]"), function (el) {
+    el.addEventListener("click", closeStorageHelp);
+  });
+
+  if (copyCmdBtn) {
+    copyCmdBtn.addEventListener("click", function () {
+      copyText(helpCmdEl ? helpCmdEl.textContent : "").then(function () {
+        toast("命令已复制，粘贴到终端执行");
+      });
+    });
+  }
+
   document.addEventListener("keydown", function (e) {
     if (e.key === "Escape") {
-      if (!profileForm.classList.contains("hidden")) {
+      if (storageHelp && !storageHelp.classList.contains("hidden")) {
+        closeStorageHelp();
+      } else if (!profileForm.classList.contains("hidden")) {
         profileForm.classList.add("hidden");
       } else if (state.view === "detail") {
         setView("home");
@@ -726,7 +905,10 @@
 
   /* ==================== 启动 ==================== */
 
-  if (!storageOK) {
+  if (STORE.kind !== "local") {
+    if (storageWarningText) {
+      storageWarningText.textContent = STORAGE_NOTICE[STORE.kind] || STORAGE_NOTICE.session;
+    }
     storageWarning.classList.remove("hidden");
   }
 

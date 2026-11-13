@@ -94,13 +94,188 @@ body {
 
 /* ===== 存储告警 ===== */
 .storage-warning {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
   background: var(--warn-bg);
   border: 1px solid var(--warn-border);
   color: var(--warn-text);
   font-size: 0.82rem;
   border-radius: 10px;
-  padding: 10px 14px;
+  padding: 10px 12px;
   margin-bottom: 14px;
+}
+
+.storage-warning.hidden {
+  display: none;
+}
+
+.storage-warning-text {
+  flex: 1;
+  line-height: 1.55;
+}
+
+.storage-help-btn {
+  flex: none;
+  border: 1px solid var(--warn-border);
+  background: #fff;
+  color: var(--warn-text);
+  font-family: inherit;
+  font-size: 0.78rem;
+  font-weight: 600;
+  padding: 4px 10px;
+  border-radius: 999px;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: background 0.18s ease;
+}
+
+.storage-help-btn:hover {
+  background: #ffedd5;
+}
+
+/* ===== 弹层面板 ===== */
+.modal {
+  position: fixed;
+  inset: 0;
+  z-index: 60;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 18px;
+}
+
+.modal.hidden {
+  display: none;
+}
+
+.modal-mask {
+  position: absolute;
+  inset: 0;
+  background: rgba(17, 24, 39, 0.45);
+  backdrop-filter: blur(2px);
+}
+
+.modal-panel {
+  position: relative;
+  width: 100%;
+  max-width: 520px;
+  max-height: 86vh;
+  overflow-y: auto;
+  background: var(--card-bg);
+  border-radius: 16px;
+  padding: 22px 22px 18px;
+  box-shadow: 0 18px 50px rgba(17, 24, 39, 0.22);
+  animation: modal-in 0.2s ease;
+}
+
+@keyframes modal-in {
+  from {
+    opacity: 0;
+    transform: translateY(10px) scale(0.98);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+.modal-title {
+  font-size: 1.15rem;
+  font-weight: 700;
+  color: var(--text);
+}
+
+.modal-sub {
+  font-size: 0.84rem;
+  color: var(--text-secondary);
+  margin: 6px 0 16px;
+  line-height: 1.6;
+}
+
+.help-list {
+  counter-reset: step;
+  list-style: none;
+}
+
+.help-step {
+  counter-increment: step;
+  display: flex;
+  gap: 10px;
+  padding: 12px 0;
+  border-top: 1px dashed var(--border);
+}
+
+.help-step.hidden {
+  display: none;
+}
+
+.help-index {
+  flex: none;
+  width: 22px;
+  height: 22px;
+  border-radius: 50%;
+  background: var(--accent-soft);
+  color: var(--accent);
+  font-size: 0.76rem;
+  font-weight: 700;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  margin-top: 2px;
+}
+
+.help-index::before {
+  content: counter(step);
+}
+
+.help-body {
+  flex: 1;
+  min-width: 0;
+}
+
+.help-title {
+  font-size: 0.9rem;
+  font-weight: 600;
+  color: var(--text);
+}
+
+.help-desc {
+  font-size: 0.8rem;
+  color: var(--text-secondary);
+  margin-top: 4px;
+  line-height: 1.6;
+}
+
+.help-code {
+  background: #f3f4f6;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 9px 11px;
+  margin: 8px 0 6px;
+  overflow-x: auto;
+  font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+  font-size: 0.76rem;
+  color: #374151;
+  white-space: pre;
+}
+
+.btn-sm {
+  font-size: 0.78rem;
+  padding: 5px 12px;
+}
+
+.modal-panel .form-actions {
+  margin-top: 14px;
+}
+
+.modal-panel code {
+  background: #f3f4f6;
+  border-radius: 4px;
+  padding: 1px 5px;
+  font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+  font-size: 0.86em;
+  color: #374151;
 }
 
 /* ===== 卡片通用 ===== */
