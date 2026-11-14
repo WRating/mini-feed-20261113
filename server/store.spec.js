@@ -10,7 +10,9 @@ import {
   DEDUPE_SEP,
   ERROR_CODES,
   EMPTY_REACTIONS,
-  REACTION_ACTIONS
+  REACTION_ACTIONS,
+  DEFAULT_MOOD,
+  MOOD_KEYS
 } from '../shared/constants.js'
 
 import { createStore } from './store.js'
@@ -817,5 +819,104 @@ describe('stats', () => {
     const stats = store.stats()
     expect(stats.likes).toBe(0)
     expect(stats.favorites).toBe(0)
+  })
+})
+
+describe('profile · 心情', () => {
+  let store
+
+  beforeEach(() => {
+    store = createStore()
+  })
+
+  it('默认心情为 DEFAULT_MOOD', () => {
+    expect(store.getProfile().mood).toBe(DEFAULT_MOOD)
+  })
+
+  it('默认心情为「心情好」（用户明确要的默认展示）', () => {
+    expect(store.getProfile().mood).toBe('great')
+  })
+
+  it('可以更新为白名单内的任意心情', () => {
+    for (const key of MOOD_KEYS) {
+      expect(store.updateProfile({ mood: key }).mood).toBe(key)
+    }
+  })
+
+  it('非法心情抛 INVALID_MOOD（不静默忽略，便于发现前端 bug）', () => {
+    expectCode(() => store.updateProfile({ mood: 'happy' }), ERROR_CODES.INVALID_MOOD)
+  })
+
+  it('非字符串心情抛 INVALID（类型错与白名单不符分开报，便于定位）', () => {
+    expectCode(() => store.updateProfile({ mood: 123 }), ERROR_CODES.INVALID)
+    expectCode(() => store.updateProfile({ mood: null }), ERROR_CODES.INVALID)
+    expectCode(() => store.updateProfile({ mood: {} }), ERROR_CODES.INVALID)
+  })
+
+  it('只改心情不影响其他字段', () => {
+    store.updateProfile({ name: '阿铁', bio: '简介', avatar: '🦊' })
+    const profile = store.updateProfile({ mood: 'down' })
+
+    expect(profile.name).toBe('阿铁')
+    expect(profile.bio).toBe('简介')
+    expect(profile.avatar).toBe('🦊')
+    expect(profile.mood).toBe('down')
+  })
+
+  it('只改其他字段不影响心情', () => {
+    store.updateProfile({ mood: 'fired' })
+    store.updateProfile({ name: '阿铁' })
+
+    expect(store.getProfile().mood).toBe('fired')
+  })
+
+  it('resetProfile 把心情一并重置', () => {
+    store.updateProfile({ mood: 'tired' })
+    expect(store.resetProfile().mood).toBe(DEFAULT_MOOD)
+  })
+
+  it('心情不影响 joinedAt', () => {
+    const before = store.getProfile().joinedAt
+    store.updateProfile({ mood: 'calm' })
+
+    expect(store.getProfile().joinedAt).toBe(before)
+  })
+
+  it('mood 与 avatar 都能改（两者都是 profile 字段，互不干扰）', () => {
+    const profile = store.updateProfile({ mood: 'calm', avatar: '🐼' })
+
+    expect(profile.mood).toBe('calm')
+    expect(profile.avatar).toBe('🐼')
+  })
+
+  it('【关键】改过心情不应阻止备份恢复资料', () => {
+    // 心情只是轻量装饰，用户随手切一下不该被当成"已认真填写过资料"。
+    // 若把 mood 计入 isDefault，用户导入备份时会莫名其妙恢复不了昵称。
+    store.updateProfile({ mood: 'down' })
+
+    const result = store.restoreProfile({ name: '备份用户' })
+
+    expect(result.applied).toBe(true)
+    expect(result.profile.name).toBe('备份用户')
+  })
+
+  it('改了昵称才真正阻止备份恢复（isDefault 仅由 name/bio/avatar 决定）', () => {
+    store.updateProfile({ name: '阿铁' })
+
+    expect(store.restoreProfile({ name: '备份用户' }).applied).toBe(false)
+  })
+
+  it('恢复备份时心情不会被顺带清掉（备份没带 mood 就保持原值）', () => {
+    store.updateProfile({ mood: 'fired' })
+
+    const result = store.restoreProfile({ name: '备份用户' })
+
+    expect(result.profile.mood).toBe('fired')
+  })
+
+  it('备份里带了 mood 时会一并恢复', () => {
+    const result = store.restoreProfile({ name: '备份用户', mood: 'calm' })
+
+    expect(result.profile.mood).toBe('calm')
   })
 })

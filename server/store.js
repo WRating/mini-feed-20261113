@@ -28,6 +28,8 @@ import {
   DEFAULT_NAME,
   DEFAULT_BIO,
   DEFAULT_AVATAR,
+  DEFAULT_MOOD,
+  MOOD_KEYS,
   DEDUPE_SEP,
   ERROR_CODES,
   REACTION_ACTIONS
@@ -101,6 +103,7 @@ export function createStore() {
       name: DEFAULT_NAME,
       bio: DEFAULT_BIO,
       avatar: DEFAULT_AVATAR,
+      mood: DEFAULT_MOOD,
       joinedAt: Date.now()
     }
   }
@@ -153,6 +156,18 @@ export function createStore() {
         throw createError(ERROR_CODES.INVALID_AVATAR, '头像不在可选列表中')
       }
       patch.avatar = source.avatar
+    }
+
+    if (source.mood !== undefined) {
+      // 与 avatar 同样处理：非法值显式报错，让前端的拼写错误尽早暴露。
+      // 心情是白名单枚举，放宽成"静默回落默认值"会让用户以为切换成功了。
+      if (typeof source.mood !== 'string') {
+        throw createError(ERROR_CODES.INVALID, '心情必须是字符串')
+      }
+      if (!MOOD_KEYS.includes(source.mood)) {
+        throw createError(ERROR_CODES.INVALID_MOOD, '心情不在可选列表中')
+      }
+      patch.mood = source.mood
     }
 
     // 注意：这里刻意**不读取** source.joinedAt。
@@ -343,6 +358,9 @@ export function createStore() {
       // 先校验，保证无论是否应用，非法输入都能被及时发现
       const normalized = normalizeProfilePatch(source)
 
+      // 判定只看 name / bio / avatar —— 刻意**不含 mood**。
+      // 心情是轻量的临时状态，用户随手切一下不该被当成"已认真填写过资料"，
+      // 否则导入备份时会拒绝恢复昵称，用户会觉得"我明明没改过资料"。
       const isDefault =
         profile.name === DEFAULT_NAME &&
         profile.bio === DEFAULT_BIO &&

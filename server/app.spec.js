@@ -15,6 +15,7 @@ import {
   DEFAULT_NAME,
   DEFAULT_BIO,
   DEFAULT_AVATAR,
+  DEFAULT_MOOD,
   EMPTY_REACTIONS
 } from '../shared/constants.js'
 
@@ -591,6 +592,7 @@ describe('GET /api/profile', () => {
       name: DEFAULT_NAME,
       bio: DEFAULT_BIO,
       avatar: DEFAULT_AVATAR,
+      mood: DEFAULT_MOOD,
       joinedAt: expect.any(Number)
     })
   })
@@ -841,5 +843,84 @@ describe('端到端流程', () => {
       const { profile } = await response.json()
       expect(profile.avatar).toBe(avatar)
     }
+  })
+})
+
+describe('PUT /api/profile · 心情', () => {
+  it('可以更新心情（默认即为「心情好」）', async () => {
+    const before = await (await json('/api/profile')).json()
+    expect(before.profile.mood).toBe('great')
+
+    const response = await json('/api/profile', { method: 'PUT', body: { mood: 'calm' } })
+    expect(response.status).toBe(200)
+
+    const { profile } = await response.json()
+    expect(profile.mood).toBe('calm')
+  })
+
+  it('非法心情返回 400 INVALID_MOOD（不能退化成 500）', async () => {
+    // 这个断言专门防「新增了错误码却忘了加进 STATUS_BY_CODE 映射表」——
+    // 那种情况下会走 500 分支，前端只看到"服务器内部错误"，无从排查。
+    const response = await json('/api/profile', { method: 'PUT', body: { mood: 'happy' } })
+
+    expect(response.status).toBe(400)
+    const body = await response.json()
+    expect(body.error.code).toBe('INVALID_MOOD')
+  })
+
+  it('非字符串心情返回 400 INVALID', async () => {
+    const response = await json('/api/profile', { method: 'PUT', body: { mood: 123 } })
+
+    expect(response.status).toBe(400)
+    expect((await response.json()).error.code).toBe('INVALID')
+  })
+
+  it('心情随 GET /api/profile 返回，可跨请求保持', async () => {
+    await json('/api/profile', { method: 'PUT', body: { mood: 'fired' } })
+
+    const { profile } = await (await json('/api/profile')).json()
+    expect(profile.mood).toBe('fired')
+  })
+
+  it('只改心情不影响昵称等其他字段', async () => {
+    await json('/api/profile', { method: 'PUT', body: { name: '阿铁', bio: '简介' } })
+    await json('/api/profile', { method: 'PUT', body: { mood: 'down' } })
+
+    const { profile } = await (await json('/api/profile')).json()
+    expect(profile.name).toBe('阿铁')
+    expect(profile.bio).toBe('简介')
+    expect(profile.mood).toBe('down')
+  })
+
+  it('重置资料时心情一并回到默认', async () => {
+    await json('/api/profile', { method: 'PUT', body: { mood: 'tired' } })
+    const { profile } = await (await json('/api/profile/reset', { method: 'POST' })).json()
+
+    expect(profile.mood).toBe('great')
+  })
+
+  it('从备份恢复资料时带上 mood 可以一并恢复', async () => {
+    const response = await json('/api/profile/restore', {
+      method: 'POST',
+      body: { profile: { name: '备份用户', mood: 'calm' } }
+    })
+
+    const body = await response.json()
+    expect(body.applied).toBe(true)
+    expect(body.profile.mood).toBe('calm')
+  })
+
+  it('备份里的非法心情被拒绝（400），不会写入脏数据', async () => {
+    const response = await json('/api/profile/restore', {
+      method: 'POST',
+      body: { profile: { name: '备份用户', mood: 'bogus' } }
+    })
+
+    expect(response.status).toBe(400)
+    expect((await response.json()).error.code).toBe('INVALID_MOOD')
+
+    // 资料未被改动
+    const { profile } = await (await json('/api/profile')).json()
+    expect(profile.mood).toBe('great')
   })
 })
