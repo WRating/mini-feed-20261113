@@ -38,6 +38,7 @@ export const ERROR_CODES = {
   EMPTY: 'EMPTY',
   TOO_LONG: 'TOO_LONG',
   INVALID_AVATAR: 'INVALID_AVATAR',
+  INVALID_MOOD: 'INVALID_MOOD',
   NOT_FOUND: 'NOT_FOUND',
   BAD_JSON: 'BAD_JSON'
 }
@@ -60,4 +61,24 @@ export const EMPTY_REACTIONS = { likes: 0, favorites: 0, liked: false, favorited
 
 /** 备份文件结构版本。v1 没有互动字段，v2 起附带 reactions */
 export const BACKUP_VERSION = 2
+
+/* ==================== 心情 ==================== */
+
+/**
+ * 可选心情白名单（顺序即 UI 展示顺序）。
+ * 心情是「个人状态」，归属 profile —— 复用 PUT /api/profile 即可，
+ * 不需要新端点，也因此自动获得备份导出 / 导入的覆盖。
+ */
+export const MOODS = [
+  { key: 'great', emoji: '😄', label: '心情好' },
+  { key: 'calm', emoji: '🙂', label: '平静' },
+  { key: 'tired', emoji: '😮‍💨', label: '有点累' },
+  { key: 'down', emoji: '😔', label: '低落' },
+  { key: 'fired', emoji: '🔥', label: '干劲满满' }
+]
+
+/** 心情键列表，便于做白名单校验 */
+export const MOOD_KEYS = MOODS.map((mood) => mood.key)
+
+export const DEFAULT_MOOD = 'great'
 

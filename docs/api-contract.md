@@ -35,10 +35,13 @@ type Post = {
 ```ts
 type ReactionKind = 'like' | 'favorite'
 
+type MoodKey = 'great' | 'calm' | 'tired' | 'down' | 'fired'
+
 type Profile = {
   name: string        // 已 trim，1..20 字
   bio: string         // 已 trim，0..60 字
   avatar: string      // 必须来自 AVATAR 白名单
+  mood: MoodKey       // 今日心情，必须来自 MOODS 白名单，默认 'great'
   joinedAt: number    // 毫秒时间戳，创建资料时确定，之后不可改
 }
 ```
@@ -57,6 +60,7 @@ type Profile = {
 | `EMPTY` | 400 | 内容为空或纯空白 |
 | `TOO_LONG` | 400 | 文本超过 280 字 |
 | `INVALID_AVATAR` | 400 | 头像不在白名单 |
+| `INVALID_MOOD` | 400 | 心情不在白名单 |
 | `NAME_TOO_LONG` | 400 | 昵称超过 20 字（服务端截断后仍超限才报错；正常情况直接截断） |
 | `NOT_FOUND` | 404 | 指定 id 的动态不存在 |
 | `BAD_JSON` | 400 | 请求体不是合法 JSON |
@@ -170,11 +174,15 @@ body { "name": "阿铁", "bio": "简介", "avatar": "🦊" }
 200 { "profile": { ... } }
 ```
 
-- 三个字段均可选，只更新传入的字段。
+- 四个字段（`name` / `bio` / `avatar` / `mood`）均可选，只更新传入的字段。
 - `name` trim 后为空 → 回退默认「我」；超过 20 字 → 截断。
 - `bio` 超过 60 字 → 截断。
 - `avatar` 不在白名单 → `400 INVALID_AVATAR`（不做静默忽略，便于发现前端 bug）。
+- `mood` 不在白名单 → `400 INVALID_MOOD`；类型不是字符串 → `400 INVALID`。
 - **`joinedAt` 不可通过此接口修改**。
+
+> 心情复用本接口而非单独端点：它本来就是 profile 的一个字段，
+> 这样自动获得了备份导出 / 导入的覆盖，也少一个端点要维护。
 
 ### 4.11 从备份恢复资料
 
@@ -186,6 +194,8 @@ body { "profile": { "name": "备份用户", "bio": "...", "avatar": "🐼" } }
 ```
 
 - 仅当当前资料**仍是默认值**（name=我、bio=默认、avatar=🙂）时才应用，返回 `applied: true`。
+- **判定刻意不含 `mood`**：心情是随手可切的轻量状态，用户点过心情不该导致
+  导入备份时昵称恢复不了。
 
 ### 4.12 重置资料
 
@@ -232,6 +242,14 @@ POST /api/posts/:id/reactions/:kind
 
 ```js
 export const MAX_LEN = 280
+export const MOODS = [
+  { key: 'great', emoji: '😄', label: '心情好' },
+  { key: 'calm',  emoji: '🙂', label: '平静' },
+  { key: 'tired', emoji: '😮‍💨', label: '有点累' },
+  { key: 'down',  emoji: '😔', label: '低落' },
+  { key: 'fired', emoji: '🔥', label: '干劲满满' }
+]
+export const DEFAULT_MOOD = 'great'
 export const NAME_MAX = 20
 export const BIO_MAX = 60
 export const AVATARS = ['🙂','😀','🐱','🐼','🦊','🚀','🌙','🍀','🎧','📚']
