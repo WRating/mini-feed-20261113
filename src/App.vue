@@ -23,14 +23,13 @@ import { computed, onMounted, ref, useTemplateRef } from 'vue'
 import { storeToRefs } from 'pinia'
 import { usePostsStore } from '@/stores/posts'
 import { useProfileStore } from '@/stores/profile'
-import { useWeatherStore } from '@/stores/weather'
 import { useDataBackup } from '@/composables/useDataBackup'
 import { useServerStats } from '@/composables/useServerStats'
 import { useToast } from '@/composables/useToast'
 import { useConfirm } from '@/composables/useConfirm'
 
 import TabBar from '@/components/TabBar.vue'
-import TodayCard from '@/components/TodayCard.vue'
+import MoodCard from '@/components/MoodCard.vue'
 import PostComposer from '@/components/PostComposer.vue'
 import PostList from '@/components/PostList.vue'
 import PostDetail from '@/components/PostDetail.vue'
@@ -42,7 +41,6 @@ import AppToast from '@/components/AppToast.vue'
 
 const postsStore = usePostsStore()
 const profileStore = useProfileStore()
-const weatherStore = useWeatherStore()
 
 const { posts, count, lastPublishedId, totalChars, loading, loadError, loaded } =
   storeToRefs(postsStore)
@@ -63,6 +61,8 @@ const detailId = ref(null)
 const helpVisible = ref(false)
 /** 发布请求进行中：用于禁用按钮与展示「发布中…」 */
 const publishing = ref(false)
+/** 心情保存中：用于禁用心情选项，避免重复请求 */
+const savingMood = ref(false)
 const profilePanelRef = useTemplateRef('profilePanel')
 const composerRef = useTemplateRef('composer')
 
@@ -185,9 +185,21 @@ async function handleSaveProfile(patch) {
   toast.show(result.ok ? '资料已保存' : result.error || '资料保存失败')
 }
 
-/* ===== 天气 ===== */
-function refreshWeather() {
-  weatherStore.refresh()
+/* ===== 心情 ===== */
+/**
+ * 切换心情。与点赞同为轻量高频操作，store 内部已做乐观更新与失败回滚，
+ * 这里只负责禁用按钮与把失败原因提示给用户。
+ */
+async function handleSelectMood(key) {
+  if (savingMood.value) return
+
+  savingMood.value = true
+  try {
+    const result = await profileStore.setMood(key)
+    if (!result.ok) toast.show(result.error)
+  } finally {
+    savingMood.value = false
+  }
 }
 
 /* ===== 备份操作 ===== */
@@ -271,8 +283,6 @@ onMounted(() => {
   // 首屏并行拉取动态 / 资料 / 统计
   loadAll()
 
-  // 天气独立加载：它的失败不该影响主数据
-  if (!weatherStore.isCacheFresh) refreshWeather()
 })
 </script>
 
@@ -310,12 +320,11 @@ onMounted(() => {
       <template v-else>
         <!-- ===== 首页 ===== -->
         <section v-show="activeTab === 'home'" class="view">
-          <TodayCard
-            :place="weatherStore.place"
-            :weather="weatherStore.weather"
-            :detail-text="weatherStore.detailText"
-            :loading="weatherStore.loading"
-            @refresh="refreshWeather"
+          <MoodCard
+            :mood="profileStore.mood"
+            :moods="profileStore.moods"
+            :pending="savingMood"
+            @select="handleSelectMood"
           />
 
           <PostComposer

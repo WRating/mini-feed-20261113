@@ -16,7 +16,6 @@ import App from './App.vue'
 import { setPostsApiFactory, resetPostsApiFactory } from '@/stores/posts'
 import { setProfileApiFactory, resetProfileApiFactory } from '@/stores/profile'
 import { setStatsApiFactory, resetStatsApiFactory } from '@/composables/useServerStats'
-import { setWeatherServiceFactory, resetWeatherServiceFactory } from '@/stores/weather'
 import { normalizeReactions, toggleReaction } from '@shared/post-shape'
 
 const NOW = new Date(2026, 10, 13, 10, 0, 0).getTime()
@@ -33,7 +32,7 @@ const homeFindAll = (wrapper, testid) => home(wrapper).findAll(`[data-testid="${
 function createFakeBackend() {
   const state = {
     posts: [],
-    profile: { name: '我', bio: '这个人很懒，什么都没写。', avatar: '🙂', joinedAt: NOW },
+    profile: { name: '我', bio: '这个人很懒，什么都没写。', avatar: '🙂', mood: 'great', joinedAt: NOW },
     failNext: null
   }
 
@@ -182,6 +181,7 @@ function createFakeBackend() {
       }
       if (patch.bio !== undefined) state.profile.bio = String(patch.bio).trim().slice(0, 60)
       if (patch.avatar !== undefined) state.profile.avatar = patch.avatar
+      if (patch.mood !== undefined) state.profile.mood = patch.mood
       return { ...state.profile }
     }),
 
@@ -219,21 +219,10 @@ function createFakeBackend() {
 
     resetProfile: vi.fn(async () => {
       maybeThrow()
-      state.profile = { name: '我', bio: '这个人很懒，什么都没写。', avatar: '🙂', joinedAt: Date.now() }
+      state.profile = { name: '我', bio: '这个人很懒，什么都没写。', avatar: '🙂', mood: 'great', joinedAt: Date.now() }
       return { ...state.profile }
     })
   }
-}
-
-function stubWeather() {
-  setWeatherServiceFactory(() => ({
-    load: async () => ({
-      ok: true,
-      place: '长沙市 · 湖南省',
-      weather: { temp: 14, apparent: 15, humidity: 95, code: 51, icon: '🌦️', label: '毛毛雨' },
-      error: null
-    })
-  }))
 }
 
 let backend
@@ -255,7 +244,6 @@ beforeEach(() => {
   setPostsApiFactory(() => backend)
   setProfileApiFactory(() => backend)
   setStatsApiFactory(() => backend)
-  stubWeather()
   vi.useFakeTimers({ shouldAdvanceTime: true })
   vi.setSystemTime(NOW)
 })
@@ -266,7 +254,6 @@ afterEach(() => {
   resetPostsApiFactory()
   resetProfileApiFactory()
   resetStatsApiFactory()
-  resetWeatherServiceFactory()
 })
 
 describe('App · 首屏加载', () => {
@@ -799,23 +786,53 @@ describe('App · 点赞与收藏', () => {
   })
 })
 
-describe('App · 天气卡片', () => {
-  it('展示天气信息', async () => {
+describe('App · 心情卡片', () => {
+  it('默认展示「心情好」，无需任何网络请求', async () => {
     await mountApp()
-    await flush()
-    await wrapper.vm.$nextTick()
 
-    expect(find(wrapper, 'weather-location').text()).toContain('长沙市')
-    expect(find(wrapper, 'weather-temp').text()).toBe('14°')
+    expect(find(wrapper, 'mood-emoji').text()).toBe('😄')
+    expect(find(wrapper, 'mood-label').text()).toBe('心情好')
   })
 
-  it('天气失败不影响动态功能', async () => {
-    setWeatherServiceFactory(() => ({
-      load: async () => ({ ok: false, place: '位置未知', weather: null, error: 'down' })
-    }))
-    backend.state.posts.push({ id: 'a', text: '动态照常', createdAt: NOW })
+  it('展示可选心情列表', async () => {
+    await mountApp()
+    expect(wrapper.findAll('[data-testid="mood-option"]').length).toBeGreaterThan(0)
+  })
+
+  it('点击心情会写到服务端并更新显示', async () => {
     await mountApp()
 
-    expect(homeFind(wrapper, 'post-text').text()).toBe('动态照常')
+    const options = wrapper.findAll('[data-testid="mood-option"]')
+    await options[3].trigger('click')
+    await flush()
+
+    expect(find(wrapper, 'mood-label').text()).toBe('低落')
+    expect(backend.state.profile.mood).toBe('down')
+  })
+
+  it('载入时用服务端返回的心情', async () => {
+    backend.state.profile.mood = 'fired'
+    await mountApp()
+
+    expect(find(wrapper, 'mood-label').text()).toBe('干劲满满')
+  })
+
+  it('保存失败时回滚并提示（心情不能停在用户选的那个）', async () => {
+    await mountApp()
+
+    backend.failNextWith('无法连接服务端')
+    await wrapper.findAll('[data-testid="mood-option"]')[1].trigger('click')
+    await flush()
+
+    expect(find(wrapper, 'mood-label').text()).toBe('心情好')
+    expect(find(wrapper, 'toast').text()).toContain('无法连接服务端')
+  })
+
+  it('心情卡片不依赖网络，后端不可达时依然正常显示', async () => {
+    backend.failNextWith('无法连接服务端')
+    await mountApp()
+
+    expect(find(wrapper, 'mood-emoji').exists()).toBe(true)
+    expect(find(wrapper, 'mood-label').text()).toBe('心情好')
   })
 })
