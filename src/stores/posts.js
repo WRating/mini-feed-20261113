@@ -11,7 +11,7 @@
  * 2. **失败必须留下痕迹**。网络问题不能只 return 个 false，否则 UI 无从解释。
  *    统一写进 `loadError`，让页面能展示「无法连接服务 + 重试」。
  *
- * 依赖注入沿用项目既有的工厂模式（同 weather store 的 setWeatherServiceFactory）。
+ * 依赖注入沿用项目既有的工厂模式（同 profile store 的 setProfileApiFactory）。
  * 注意不要用 usePostsStore(api) —— Pinia 会把第一个参数当成 pinia 实例而崩。
  */
 import { computed, ref } from 'vue'

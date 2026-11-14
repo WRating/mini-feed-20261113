@@ -18,7 +18,7 @@ import {
   resetProfileApiFactory
 } from './profile'
 import { ApiError } from '@/services/api-client'
-import { NAME_MAX, BIO_MAX } from '@shared/constants'
+import { NAME_MAX, BIO_MAX, MOOD_KEYS, MOODS } from '@shared/constants'
 
 const NOW = new Date(2026, 10, 13, 10, 0, 0).getTime()
 const DAY = 86_400_000
@@ -47,6 +47,12 @@ function normalizePatch(source) {
     }
     patch.avatar = source.avatar
   }
+  if (source.mood !== undefined) {
+    if (!MOOD_KEYS.includes(source.mood)) {
+      throw new ApiError('INVALID_MOOD', '心情不在可选列表中', 400)
+    }
+    patch.mood = source.mood
+  }
   return patch
 }
 
@@ -56,6 +62,7 @@ function fakeApi({ initial = {}, ...overrides } = {}) {
     name: DEFAULT_NAME,
     bio: DEFAULT_BIO,
     avatar: DEFAULT_AVATAR,
+    mood: 'great',
     joinedAt: NOW - 3 * DAY,
     ...initial
   }
@@ -80,6 +87,7 @@ function fakeApi({ initial = {}, ...overrides } = {}) {
         name: DEFAULT_NAME,
         bio: DEFAULT_BIO,
         avatar: DEFAULT_AVATAR,
+        mood: 'great',
         joinedAt: Date.now()
       }
       return { ...profile }
@@ -410,5 +418,119 @@ describe('profile store · reset', () => {
     await store.reset()
     expect(store.name).toBe('阿铁')
     expect(store.loadError).toBe('无法连接服务端')
+  })
+})
+
+describe('profile store · 心情', () => {
+  it('默认心情为「心情好」', () => {
+    const store = storeWith(fakeApi())
+    expect(store.mood).toBe('great')
+  })
+
+  it('从服务端载入心情', async () => {
+    const store = storeWith(fakeApi({ initial: { mood: 'fired' } }))
+    await store.load()
+    expect(store.mood).toBe('fired')
+  })
+
+  it('setMood 更新本地并写到服务端', async () => {
+    const api = fakeApi()
+    const store = storeWith(api)
+    await store.load()
+
+    const result = await store.setMood('calm')
+
+    expect(result.ok).toBe(true)
+    expect(store.mood).toBe('calm')
+    expect(api.updateProfile).toHaveBeenCalledWith({ mood: 'calm' })
+  })
+
+  it('白名单内每个心情都能设置', async () => {
+    const store = storeWith(fakeApi())
+    await store.load()
+
+    for (const mood of MOODS) {
+      const result = await store.setMood(mood.key)
+      expect(result.ok).toBe(true)
+      expect(store.mood).toBe(mood.key)
+    }
+  })
+
+  it('非法心情键不会发给服务端（本地先挡，省一次必然 400 的请求）', async () => {
+    const api = fakeApi()
+    const store = storeWith(api)
+    await store.load()
+
+    const result = await store.setMood('happy')
+
+    expect(result.ok).toBe(false)
+    expect(api.updateProfile).not.toHaveBeenCalled()
+    expect(store.mood).toBe('great')
+  })
+
+  it('【关键】服务端拒绝时回滚到原心情', async () => {
+    const api = fakeApi()
+    const store = storeWith(api)
+    await store.load()
+
+    api.updateProfile.mockRejectedValueOnce(new ApiError('NETWORK', '无法连接服务端', 0))
+    const result = await store.setMood('down')
+
+    expect(result.ok).toBe(false)
+    expect(result.error).toContain('无法连接服务端')
+    expect(store.mood).toBe('great')
+  })
+
+  it('切换心情不影响其他字段', async () => {
+    const api = fakeApi({
+      initial: { name: '阿铁', bio: '简介', avatar: '🦊' }
+    })
+    const store = storeWith(api)
+    await store.load()
+
+    await store.setMood('down')
+
+    expect(store.name).toBe('阿铁')
+    expect(store.bio).toBe('简介')
+    expect(store.avatar).toBe('🦊')
+  })
+
+  it('服务端返回非法心情时本地回落到默认（不渲染空白）', async () => {
+    const store = storeWith(fakeApi({ initial: { mood: 'bogus' } }))
+    await store.load()
+
+    expect(store.mood).toBe('great')
+  })
+
+  it('load 失败时心情保持默认而不是 undefined', async () => {
+    const api = fakeApi()
+    api.getProfile.mockRejectedValueOnce(new Error('离线'))
+    const store = storeWith(api)
+
+    await store.load()
+
+    expect(store.mood).toBe('great')
+  })
+
+  it('reset 后心情回到默认', async () => {
+    const store = storeWith(fakeApi())
+    await store.load()
+    await store.setMood('tired')
+
+    await store.reset()
+
+    expect(store.mood).toBe('great')
+  })
+
+  it('moodView 提供表情与文案供 UI 直接使用', async () => {
+    const store = storeWith(fakeApi({ initial: { mood: 'fired' } }))
+    await store.load()
+
+    expect(store.moodView).toEqual({ key: 'fired', emoji: '🔥', label: '干劲满满' })
+  })
+
+  it('moodView 对非法心情回落默认，不抛错', () => {
+    const store = storeWith(fakeApi())
+    expect(store.moodView.emoji).toBe('😄')
   })
 })

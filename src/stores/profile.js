@@ -8,23 +8,26 @@
  * 唯一保留的本地校验是「不信任远端数据」的读取兜底：服务端万一返回了非法头像或
  * 缺失字段，本地回退默认值而不是把脏数据塞进 UI。
  *
- * 依赖注入沿用工厂模式（同 weather / posts），不要用 useProfileStore(api)。
+ * 依赖注入沿用工厂模式（同 posts），不要用 useProfileStore(api)。
  */
 import { computed, ref } from 'vue'
 import { defineStore } from 'pinia'
 import { createApiClient } from '@/services/api-client'
 import { daysSince } from '@/utils/time'
+import { isValidMood, moodView as toMoodView } from '@shared/mood'
 import {
   AVATARS,
   NAME_MAX,
   BIO_MAX,
   DEFAULT_NAME,
   DEFAULT_BIO,
-  DEFAULT_AVATAR
+  DEFAULT_AVATAR,
+  DEFAULT_MOOD,
+  MOODS
 } from '@shared/constants'
 
 // 从共享常量 re-export：UI 与旧调用方仍在用这些名字，避免两处魔数漂移
-export { AVATARS, NAME_MAX, BIO_MAX }
+export { AVATARS, NAME_MAX, BIO_MAX, MOODS }
 
 let apiFactory = () => createApiClient()
 
@@ -45,6 +48,8 @@ export const useProfileStore = defineStore('profile', () => {
   const name = ref(DEFAULT_NAME)
   const bio = ref(DEFAULT_BIO)
   const avatar = ref(DEFAULT_AVATAR)
+  /** 今日心情，属于 profile 的一部分（复用 PUT /api/profile，无需单独端点） */
+  const mood = ref(DEFAULT_MOOD)
   const joinedAt = ref(Date.now())
 
   const loading = ref(false)
@@ -53,10 +58,17 @@ export const useProfileStore = defineStore('profile', () => {
   /** 使用天数（含首日） */
   const daysUsed = computed(() => daysSince(joinedAt.value))
 
-  /** 是否仍是初始资料（用于判断导入备份时能否覆盖资料） */
+  /**
+   * 是否仍是初始资料（用于判断导入备份时能否覆盖资料）。
+   * 与后端保持一致：**只看 name / bio / avatar，不含 mood**。
+   * 心情是随手可切的轻量状态，不该让用户"因为点过心情就恢复不了昵称"。
+   */
   const isDefault = computed(
     () => name.value === DEFAULT_NAME && bio.value === DEFAULT_BIO && avatar.value === DEFAULT_AVATAR
   )
+
+  /** 心情的展示信息（表情 + 文案），非法值自动回落默认，UI 无需再判断 */
+  const moodView = computed(() => toMoodView(mood.value))
 
   /**
    * 把服务端下发的资料落到本地状态，逐字段校验。
@@ -75,6 +87,11 @@ export const useProfileStore = defineStore('profile', () => {
     }
     if (typeof profile.avatar === 'string' && AVATARS.includes(profile.avatar)) {
       avatar.value = profile.avatar
+    }
+    // 心情非法或缺失时保留原值：同 avatar 一样属于「不可信远端输入」的兜底。
+    // 注意不回落成空字符串 —— 那会让卡片渲染出空白表情，用户以为什么都坏了。
+    if (isValidMood(profile.mood)) {
+      mood.value = profile.mood
     }
     // joinedAt 非有限数时保留原值：编造一个时间比沿用旧值更容易误导「使用天数」
     if (Number.isFinite(profile.joinedAt)) {
@@ -157,7 +174,42 @@ export const useProfileStore = defineStore('profile', () => {
     }
   }
 
-  /** 重置为默认资料；joinedAt 由服务端刷新为当下 */
+  /**
+   * 切换今日心情。
+   *
+   * 与点赞同样是「高频轻量操作」，因此先改本地让表情立刻变化，失败再回滚。
+   * 非法键在本地就挡掉：服务端必然会以 INVALID_MOOD 拒绝，白跑一次请求没意义。
+   *
+   * 返回 { ok, error? } 供调用方决定是否提示。
+   */
+  async function setMood(next) {
+    if (!isValidMood(next)) {
+      return { ok: false, error: '未知的心情' }
+    }
+    // 选中的就是当前心情：不发请求（避免无意义的写入与按钮闪烁）
+    if (next === mood.value) {
+      return { ok: true }
+    }
+
+    const previous = mood.value
+    mood.value = next
+
+    try {
+      const updated = await api.updateProfile({ mood: next })
+      // 以服务端返回为准，而不是继续用本地推测的值
+      apply(updated)
+      loadError.value = null
+      return { ok: true }
+    } catch (error) {
+      // 回滚：失败后表情不能停在用户选的那个，否则与服务端不一致
+      mood.value = previous
+      return { ok: false, error: fail(error, '心情保存失败') }
+    }
+  }
+
+  /**
+   * 重置为默认资料；joinedAt 由服务端刷新为当下
+   */
   async function reset() {
     try {
       apply(await api.resetProfile())
@@ -170,9 +222,12 @@ export const useProfileStore = defineStore('profile', () => {
 
   return {
     avatars: AVATARS,
+    moods: MOODS,
     name,
     bio,
     avatar,
+    mood,
+    moodView,
     joinedAt,
     loading,
     loadError,
@@ -180,6 +235,7 @@ export const useProfileStore = defineStore('profile', () => {
     isDefault,
     load,
     update,
+    setMood,
     restoreFromBackup,
     reset
   }
